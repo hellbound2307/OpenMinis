@@ -209,7 +209,20 @@ private fun providerIcon(type: ProviderType): Pair<ImageVector, Color> = when (t
 private fun availableCredentials(type: ProviderType): List<ProviderCredential> {
     return when (type) {
         ProviderType.openRouter -> listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
-        ProviderType.anthropic,
+        // [T-android-zai-preset] Anthropic-protocol OAuth is Claude Code
+        // OAuth — the issued tokens are only valid against
+        // api.anthropic.com, and every request must carry the build-time
+        // ANTHROPIC_OAUTH_IDENTIFIER_PROMPT. When that prompt is empty (the
+        // public mirror default), OAuth requests can never succeed: hide the
+        // option instead of letting users create a provider that only
+        // produces errors. Third-party Claude-compatible endpoints (z.ai,
+        // GLM, …) authenticate with an API key in every case.
+        ProviderType.anthropic -> buildList {
+            add(ProviderCredential.apiKey)
+            if (com.openminis.app.BuildConfig.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT.isNotEmpty()) {
+                add(ProviderCredential.oauth)
+            }
+        }
         ProviderType.openAI -> listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
         ProviderType.gemini -> listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
         // xAI Grok primarily targets SuperGrok / X Premium+ OAuth, but also

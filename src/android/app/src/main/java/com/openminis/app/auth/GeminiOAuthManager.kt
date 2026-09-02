@@ -186,8 +186,14 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
         if (!gcpProjectId.isNullOrEmpty()) return@withContext true
         val token = validAccessToken() ?: return@withContext false
 
-        // Try loadCodeAssist first
-        val projectId = loadCodeAssist(token) ?: onboardUser(token)
+        // Gemini Code Assist protocol (gemini-cli wire format):
+        //   1. loadCodeAssist — paid tiers (AI Pro/Ultra) return
+        //      cloudaicompanionProject directly.
+        //   2. Otherwise onboardUser with a tier from allowedTiers, then
+        //      poll the returned LRO operation until it yields the project.
+        val assist = loadCodeAssist(token)
+        val projectId = assist?.projectId
+            ?: onboardUser(token, assist?.tierId ?: "free-gemini")
         if (projectId != null) {
             gcpProjectId = projectId
             return@withContext true
@@ -195,7 +201,9 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
         false
     }
 
-    private fun loadCodeAssist(token: String): String? {
+    private data class CodeAssistLoad(val projectId: String?, val tierId: String?)
+
+    private fun loadCodeAssist(token: String): CodeAssistLoad? {
         return try {
             val conn = URL("https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist").openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
@@ -203,17 +211,41 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
             conn.setRequestProperty("User-Agent", USER_AGENT)
             conn.setRequestProperty("Content-Type", "application/json")
             conn.doOutput = true
-            conn.outputStream.write("{}".toByteArray())
+            conn.outputStream.write(
+                """{"metadata":{"ideType":"IDE_UNSPECIFIED","pluginType":"GEMINI"}}""".toByteArray(),
+            )
             val response = if (conn.responseCode == 200) conn.inputStream.bufferedReader().readText() else null
             conn.disconnect()
-            response?.let { JSONObject(it).optString("gcpProjectId").ifEmpty { null } }
+            if (response == null) return null
+            val json = JSONObject(response)
+            // cloudaicompanionProject is a STRING project id on most tiers;
+            // some responses wrap it as an object with an "id". Keep the
+            // Antigravity-style gcpProjectId as a last-resort fallback.
+            val project = json.optString("cloudaicompanionProject").ifEmpty { null }
+                ?: json.optJSONObject("cloudaicompanionProject")?.optString("id")?.ifEmpty { null }
+                ?: json.optString("gcpProjectId").ifEmpty { null }
+            // Onboarding tier: prefer the default tier Google advertises,
+            // falling back to the free tier id gemini-cli uses.
+            var tier: String? = null
+            var free: String? = null
+            val tiers = json.optJSONArray("allowedTiers")
+            if (tiers != null) {
+                for (i in 0 until tiers.length()) {
+                    val t = tiers.optJSONObject(i) ?: continue
+                    val id = t.optString("id")
+                    if (id.isEmpty()) continue
+                    if (t.optBoolean("isDefault") && tier == null) tier = id
+                    if (id == "free-gemini") free = id
+                }
+            }
+            CodeAssistLoad(project, free ?: tier ?: "free-gemini")
         } catch (e: Exception) {
             Log.d(TAG, "loadCodeAssist failed: ${e.message}")
             null
         }
     }
 
-    private suspend fun onboardUser(token: String): String? {
+    private suspend fun onboardUser(token: String, tierId: String): String? {
         return try {
             val conn = URL("https://cloudcode-pa.googleapis.com/v1internal:onboardUser").openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
@@ -221,7 +253,10 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
             conn.setRequestProperty("User-Agent", USER_AGENT)
             conn.setRequestProperty("Content-Type", "application/json")
             conn.doOutput = true
-            conn.outputStream.write("""{"setupMetadata":{"ideType":"NEOVIM","platforms":["LINUX"]}}""".toByteArray())
+            conn.outputStream.write(
+                """{"tierId":"$tierId","licenseState":"LICENSE_STATE_UNSPECIFIED",""" +
+                    """"metadata":{"ideType":"IDE_UNSPECIFIED","pluginType":"GEMINI"}}""".toByteArray(),
+            )
             val responseCode = conn.responseCode
             val body = if (responseCode == 200) conn.inputStream.bufferedReader().readText() else null
             conn.disconnect()
@@ -232,13 +267,23 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
                 if (opName.isNotEmpty()) {
                     pollOperation(token, opName)
                 } else {
-                    json.optString("gcpProjectId").ifEmpty { null }
+                    operationProject(json)
                 }
             } else null
         } catch (e: Exception) {
             Log.w(TAG, "onboardUser failed", e)
             null
         }
+    }
+
+    /** Unwrap an LRO result: response.cloudaicompanionProject.{id|string} or response.gcpProjectId. */
+    private fun operationProject(json: JSONObject): String? {
+        val response = json.optJSONObject("response") ?: return json.optString("gcpProjectId").ifEmpty { null }
+        val cap = response.optJSONObject("cloudaicompanionProject")
+        return cap?.optString("id")?.ifEmpty { null }
+            ?: cap?.optString("name")?.ifEmpty { null }
+            ?: response.optString("cloudaicompanionProject").ifEmpty { null }
+            ?: response.optString("gcpProjectId").ifEmpty { null }
     }
 
     private suspend fun pollOperation(token: String, operationName: String): String? {
@@ -253,7 +298,7 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
                 if (body != null) {
                     val json = JSONObject(body)
                     if (json.optBoolean("done")) {
-                        return json.optJSONObject("response")?.optString("gcpProjectId")?.ifEmpty { null }
+                        return operationProject(json)
                     }
                 }
             } catch (_: Exception) {}

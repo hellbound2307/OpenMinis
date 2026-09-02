@@ -75,6 +75,23 @@ class TelegramClient(@Suppress("unused") private val context: Context) {
         /** Politeness gap between part uploads (bot ≈ 1 msg/s per chat). */
         private const val PART_GAP_MS = 1_100L
 
+        /**
+         * Bot tokens are frequently pasted with the leading "bot" from
+         * BotFather's "Use this token to access the HTTP API" line
+         * (bot123456:AA…), or with surrounding quotes / stray whitespace.
+         * Any of those turn the URL path into something Telegram answers
+         * with 404 "Not Found" instead of a 401 — which reads like a server
+         * problem. Strip them before the token touches a URL.
+         */
+        internal fun normalizeBotToken(raw: String): String =
+            raw.trim().trim('"', '\'')
+                .removePrefix("bot").removePrefix("Bot").removePrefix("BOT")
+                .removePrefix("bot")
+                .replace(Regex("\\s+"), "")
+
+        /** Shape of a well-formed bot token: <digits>:<20+ base64url-ish>. */
+        private val BOT_TOKEN_SHAPE = Regex("^\\d+:[A-Za-z0-9_-]{20,}$")
+
         private val JSON_MEDIA = "application/json".toMediaType()
         private val OCTET_STREAM = "application/octet-stream".toMediaType()
     }
@@ -92,7 +109,7 @@ class TelegramClient(@Suppress("unused") private val context: Context) {
     /** POST a JSON method call. Returns the `result` object, or throws. */
     private fun api(token: String, method: String, body: JSONObject): JSONObject {
         val request = Request.Builder()
-            .url("$API_BASE/bot$token/$method")
+            .url("$API_BASE/bot${normalizeBotToken(token)}/$method")
             .post(body.toString().toRequestBody(JSON_MEDIA))
             .build()
         val response = http.newCall(request).execute()
@@ -129,7 +146,7 @@ class TelegramClient(@Suppress("unused") private val context: Context) {
             )
             .build()
         val request = Request.Builder()
-            .url("$API_BASE/bot$token/sendDocument")
+            .url("$API_BASE/bot${normalizeBotToken(token)}/sendDocument")
             .post(requestBody)
             .build()
         val response = http.newCall(request).execute()
@@ -159,7 +176,7 @@ class TelegramClient(@Suppress("unused") private val context: Context) {
         val meta = api(token, "getFile", JSONObject().put("file_id", fileId))
         val path = meta.optString("file_path").takeIf { it.isNotEmpty() }
             ?: throw TelegramException("Telegram returned no file path.")
-        val request = Request.Builder().url("$API_BASE/file/bot$token/$path").build()
+        val request = Request.Builder().url("$API_BASE/file/bot${normalizeBotToken(token)}/$path").build()
         val response = http.newCall(request).execute()
         if (!response.isSuccessful) {
             val code = response.code
@@ -285,13 +302,26 @@ class TelegramClient(@Suppress("unused") private val context: Context) {
      * proves the token, getChat proves the bot can actually SEE the chat —
      * the missing-invite failure is otherwise invisible until the first
      * backup silently fails.
+     *
+     * Returns the NORMALIZED token (BotFather "bot" prefix, quotes and
+     * whitespace stripped) — callers must persist THIS value, not the raw
+     * input, so stored secrets are always clean.
      */
-    fun verify(token: String, chatId: String) {
-        val me = api(token, "getMe", JSONObject())
+    fun verify(token: String, chatId: String): String {
+        val clean = normalizeBotToken(token)
+        if (!BOT_TOKEN_SHAPE.matches(clean)) {
+            throw TelegramException(
+                "That doesn't look like a bot token. A token looks like " +
+                    "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw — paste exactly " +
+                    "what @BotFather sent, without the leading word \"bot\".",
+            )
+        }
+        val me = api(clean, "getMe", JSONObject())
         val botName = me.optString("username").ifEmpty { "?" }
-        val chat = api(token, "getChat", JSONObject().put("chat_id", chatId))
+        val chat = api(clean, "getChat", JSONObject().put("chat_id", chatId))
         val title = chat.optString("title").ifEmpty { chat.optString("first_name").ifEmpty { chatId } }
         AppLogger.info(TAG, "[Telegram] verified bot=@$botName chat=$title")
+        return clean
     }
 
     /**

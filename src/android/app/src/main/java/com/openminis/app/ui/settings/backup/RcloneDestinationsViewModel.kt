@@ -103,12 +103,15 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
                         throw IllegalArgumentException("Bot token and chat ID are both required.")
                     }
                     withContext(Dispatchers.IO) {
-                        TelegramClient(getApplication()).verify(token, chatId)
+                        // verify() returns the normalized token (BotFather
+                        // "bot" prefix / quotes / whitespace stripped) —
+                        // persist THAT, not the raw paste.
+                        val saved = TelegramClient(getApplication()).verify(token, chatId)
                         store.add(
                             name = displayName,
                             backend = "telegram",
                             params = mapOf("chat_id" to chatId),
-                            secret = token,
+                            secret = saved,
                             path = "",
                         )
                     }
