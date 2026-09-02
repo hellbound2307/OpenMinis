@@ -52,7 +52,17 @@ fun interface NativeOffloadHandler {
 
 object NativeOffloadServer {
     private const val TAG = "NativeOffloadServer"
-    private const val SOCKET_NAME = "native-offload"
+    // [T-fork-sidebyside] Abstract-socket names live in the SHARED kernel
+    // net namespace (Android does not give apps per-UID net namespaces), so
+    // a fixed name collides when two installs run at once: the official
+    // com.openminis.app holds 'native-offload' and this fork fails to bind
+    // at Application.onCreate → launch crash. Namespace the name by
+    // applicationId; BuildConfig.APPLICATION_ID is a compile-time constant
+    // so this stays a const. 35 bytes for the fork id — well under the
+    // 108-byte sun_path limit. proot receives the exact name via
+    // --native-offload=${NativeOffloadServer.socketName} in all three argv
+    // builders, so no guest-side change is needed.
+    private const val SOCKET_NAME = "native-offload-" + com.openminis.app.BuildConfig.APPLICATION_ID
     private const val MAGIC_REQ = 0x46464F4E  // 'N' 'O' 'F' 'F' little-endian
     private const val MAGIC_RSP = 0x52464F4E  // 'N' 'O' 'F' 'R'
     private const val VERSION = 1
