@@ -182,96 +182,212 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
         }
     }
 
-    suspend fun discoverProjectIfNeeded(): Boolean = withContext(Dispatchers.IO) {
-        if (!gcpProjectId.isNullOrEmpty()) return@withContext true
-        val token = validAccessToken() ?: return@withContext false
+    /**
+     * Detailed, user-facing Code Assist provisioning failure. Carries Google's
+     * actual reason (HTTP status + error message / ineligibility text) so the
+     * chat error bubble says WHY instead of a generic "could not provision".
+     */
+    class CodeAssistProvisioningException(message: String) : Exception(message)
 
-        // Gemini Code Assist protocol (gemini-cli wire format):
-        //   1. loadCodeAssist — paid tiers (AI Pro/Ultra) return
-        //      cloudaicompanionProject directly.
-        //   2. Otherwise onboardUser with a tier from allowedTiers, then
-        //      poll the returned LRO operation until it yields the project.
-        val assist = loadCodeAssist(token)
-        val projectId = assist?.projectId
-            ?: onboardUser(token, assist?.tierId ?: "free-gemini")
-        if (projectId != null) {
-            gcpProjectId = projectId
-            return@withContext true
+    /**
+     * Resolve (and cache) the Code Assist project id, throwing
+     * [CodeAssistProvisioningException] with Google's real reason on failure.
+     *
+     * Wire format mirrors gemini-cli `_doSetupUser` (setup.ts) exactly:
+     *   1. `loadCodeAssist` — paid tiers return `cloudaicompanionProject`
+     *      directly; free accounts get tier info without a project.
+     *   2. `ineligibleTiers` with `VALIDATION_REQUIRED` → surface the
+     *      validation URL; any other ineligibility → surface the reasons
+     *      (region, account type, age…).
+     *   3. `currentTier` without a project → workspace-style account that
+     *      requires a user-defined Cloud project.
+     *   4. Otherwise `onboardUser` with the default advertised tier — the
+     *      free tier body OMITS `cloudaicompanionProject` (sending one makes
+     *      Google answer `Precondition Failed`) and carries no licenseState.
+     *      Poll the returned LRO operation until it yields the project.
+     */
+    suspend fun resolveProject(): String = withContext(Dispatchers.IO) {
+        gcpProjectId?.let { return@withContext it }
+        val token = validAccessToken()
+            ?: throw CodeAssistProvisioningException(
+                "Google sign-in has expired. Open the provider settings and sign in again.",
+            )
+
+        // 1. loadCodeAssist
+        val load = loadCodeAssist(token)
+        load.projectId?.let {
+            gcpProjectId = it
+            return@withContext it
         }
-        false
+
+        // 2. Eligibility problems — Google told us exactly why this account
+        //    can't get a Code Assist project. Say so instead of "try again".
+        load.ineligible.firstOrNull {
+            it.reasonCode == "VALIDATION_REQUIRED" && !it.validationUrl.isNullOrEmpty()
+        }?.let { v ->
+            throw CodeAssistProvisioningException(
+                "Google requires account validation before Gemini Code Assist can be " +
+                    "provisioned (${v.reasonMessage ?: "verify your account"}). Open " +
+                    "${v.validationUrl} in a browser, complete the check, then sign in again.",
+            )
+        }
+        if (load.ineligible.isNotEmpty()) {
+            val reasons = load.ineligible
+                .mapNotNull { it.reasonMessage?.takeIf(String::isNotEmpty) ?: it.reasonCode }
+                .distinct()
+                .joinToString("; ")
+                .ifEmpty { "unknown reason" }
+            throw CodeAssistProvisioningException(
+                "This Google account is not eligible for Gemini Code Assist: $reasons. " +
+                    "Configure the provider with an AI Studio API key instead.",
+            )
+        }
+
+        // 3. currentTier without a project — workspace / Cloud-identity accounts
+        //    (gemini-cli throws ProjectIdRequiredError here; an Android app has
+        //    no env var to point at a project, so say what's missing).
+        load.currentTierId?.let { tier ->
+            throw CodeAssistProvisioningException(
+                "Google sign-in succeeded, but this account's tier ($tier) requires a " +
+                    "Google Cloud project that could not be determined. Personal accounts " +
+                    "can use an AI Studio API key instead.",
+            )
+        }
+
+        // 4. Onboard with the tier Google advertises as default.
+        val tier = load.defaultTierId ?: "free-tier"
+        val project = onboardUser(token, tier)
+            ?: throw CodeAssistProvisioningException(
+                "Gemini Code Assist onboarding did not return a project (tier '$tier'). " +
+                    "Try signing in again, or configure the provider with an AI Studio " +
+                    "API key instead.",
+            )
+        gcpProjectId = project
+        project
     }
 
-    private data class CodeAssistLoad(val projectId: String?, val tierId: String?)
+    /** Boolean compatibility wrapper over [resolveProject]. */
+    suspend fun discoverProjectIfNeeded(): Boolean =
+        try {
+            resolveProject(); true
+        } catch (_: Exception) {
+            false
+        }
 
-    private fun loadCodeAssist(token: String): CodeAssistLoad? {
-        return try {
-            val conn = URL("https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist").openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.setRequestProperty("Authorization", "Bearer $token")
-            conn.setRequestProperty("User-Agent", USER_AGENT)
-            conn.setRequestProperty("Content-Type", "application/json")
-            conn.doOutput = true
-            conn.outputStream.write(
-                """{"metadata":{"ideType":"IDE_UNSPECIFIED","pluginType":"GEMINI"}}""".toByteArray(),
-            )
-            val response = if (conn.responseCode == 200) conn.inputStream.bufferedReader().readText() else null
-            conn.disconnect()
-            if (response == null) return null
-            val json = JSONObject(response)
-            // cloudaicompanionProject is a STRING project id on most tiers;
-            // some responses wrap it as an object with an "id". Keep the
-            // Antigravity-style gcpProjectId as a last-resort fallback.
-            val project = json.optString("cloudaicompanionProject").ifEmpty { null }
-                ?: json.optJSONObject("cloudaicompanionProject")?.optString("id")?.ifEmpty { null }
-                ?: json.optString("gcpProjectId").ifEmpty { null }
-            // Onboarding tier: prefer the default tier Google advertises,
-            // falling back to the free tier id gemini-cli uses.
-            var tier: String? = null
-            var free: String? = null
-            val tiers = json.optJSONArray("allowedTiers")
-            if (tiers != null) {
-                for (i in 0 until tiers.length()) {
-                    val t = tiers.optJSONObject(i) ?: continue
-                    val id = t.optString("id")
-                    if (id.isEmpty()) continue
-                    if (t.optBoolean("isDefault") && tier == null) tier = id
-                    if (id == "free-gemini") free = id
+    private data class CodeAssistIneligible(
+        val reasonCode: String?,
+        val reasonMessage: String?,
+        val validationUrl: String?,
+    )
+
+    private data class CodeAssistLoad(
+        val projectId: String?,
+        val currentTierId: String?,
+        val defaultTierId: String?,
+        val ineligible: List<CodeAssistIneligible>,
+    )
+
+    /**
+     * POST a Code Assist call and return (HTTP code, body). Errors are NEVER
+     * swallowed here — the caller turns them into a surfaced reason.
+     */
+    private fun postCodeAssist(token: String, url: String, body: String): Pair<Int, String> {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.setRequestProperty("Authorization", "Bearer $token")
+        conn.setRequestProperty("User-Agent", USER_AGENT)
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.doOutput = true
+        conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+        val code = conn.responseCode
+        val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.readText() ?: ""
+        conn.disconnect()
+        return code to text
+    }
+
+    /** Extract Google's `error.message` (or a truncated raw body) for display. */
+    private fun describeFailure(action: String, code: Int, body: String): String {
+        val detail = try {
+            val err = JSONObject(body).optJSONObject("error")
+            err?.optString("message")?.takeIf { it.isNotEmpty() }
+                ?: err?.optString("status")?.takeIf { it.isNotEmpty() }
+        } catch (_: Exception) {
+            null
+        } ?: body.take(200).ifBlank { "no response body" }
+        AppLogger.warning(TAG, "Code Assist $action failed: HTTP $code $detail")
+        return "Google rejected $action (HTTP $code): $detail"
+    }
+
+    private fun loadCodeAssist(token: String): CodeAssistLoad {
+        val (code, body) = postCodeAssist(
+            token,
+            "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+            """{"metadata":{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}}""",
+        )
+        if (code !in 200..299) {
+            throw CodeAssistProvisioningException(describeFailure("loading your Gemini Code Assist profile", code, body))
+        }
+        val json = try { JSONObject(body) } catch (e: Exception) {
+            throw CodeAssistProvisioningException("Google returned an unreadable Code Assist profile: ${body.take(200)}")
+        }
+        AppLogger.info(TAG, "loadCodeAssist ok: ${json.toString().take(400)}")
+
+        // cloudaicompanionProject is a STRING project id on most tiers; some
+        // responses wrap it as an object with an "id".
+        val project = json.optString("cloudaicompanionProject").ifEmpty { null }
+            ?: json.optJSONObject("cloudaicompanionProject")?.optString("id")?.ifEmpty { null }
+
+        val currentTierId = json.optJSONObject("currentTier")?.optString("id")?.ifEmpty { null }
+
+        // Default advertised tier → the onboarding tier gemini-cli picks.
+        var defaultTier: String? = null
+        val tiers = json.optJSONArray("allowedTiers")
+        if (tiers != null) {
+            for (i in 0 until tiers.length()) {
+                val t = tiers.optJSONObject(i) ?: continue
+                val id = t.optString("id")
+                if (id.isNotEmpty() && t.optBoolean("isDefault")) {
+                    defaultTier = id
+                    break
                 }
             }
-            CodeAssistLoad(project, free ?: tier ?: "free-gemini")
-        } catch (e: Exception) {
-            Log.d(TAG, "loadCodeAssist failed: ${e.message}")
-            null
         }
+
+        val ineligible = mutableListOf<CodeAssistIneligible>()
+        val bad = json.optJSONArray("ineligibleTiers")
+        if (bad != null) {
+            for (i in 0 until bad.length()) {
+                val t = bad.optJSONObject(i) ?: continue
+                ineligible.add(
+                    CodeAssistIneligible(
+                        reasonCode = t.optString("reasonCode").ifEmpty { null },
+                        reasonMessage = t.optString("reasonMessage").ifEmpty { null },
+                        validationUrl = t.optString("validationUrl").ifEmpty { null },
+                    ),
+                )
+            }
+        }
+        return CodeAssistLoad(project, currentTierId, defaultTier, ineligible)
     }
 
     private suspend fun onboardUser(token: String, tierId: String): String? {
-        return try {
-            val conn = URL("https://cloudcode-pa.googleapis.com/v1internal:onboardUser").openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.setRequestProperty("Authorization", "Bearer $token")
-            conn.setRequestProperty("User-Agent", USER_AGENT)
-            conn.setRequestProperty("Content-Type", "application/json")
-            conn.doOutput = true
-            conn.outputStream.write(
-                """{"tierId":"$tierId","licenseState":"LICENSE_STATE_UNSPECIFIED","metadata":{"ideType":"IDE_UNSPECIFIED","pluginType":"GEMINI"}}""".toByteArray(),
-            )
-            val responseCode = conn.responseCode
-            val body = if (responseCode == 200) conn.inputStream.bufferedReader().readText() else null
-            conn.disconnect()
-
-            if (body != null) {
-                val json = JSONObject(body)
-                val opName = json.optString("name")
-                if (opName.isNotEmpty()) {
-                    pollOperation(token, opName)
-                } else {
-                    operationProject(json)
-                }
-            } else null
-        } catch (e: Exception) {
-            Log.w(TAG, "onboardUser failed", e)
-            null
+        val (code, body) = postCodeAssist(
+            token,
+            "https://cloudcode-pa.googleapis.com/v1internal:onboardUser",
+            """{"tierId":"$tierId","metadata":{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}}""",
+        )
+        if (code !in 200..299) {
+            AppLogger.warning(TAG, "onboardUser failed: HTTP $code ${body.take(300)}")
+            return null
+        }
+        val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
+        val opName = json.optString("name")
+        return if (opName.isNotEmpty()) {
+            AppLogger.info(TAG, "onboardUser LRO: $opName")
+            pollOperation(token, opName)
+        } else {
+            operationProject(json)
         }
     }
 
@@ -286,21 +402,40 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
     }
 
     private suspend fun pollOperation(token: String, operationName: String): String? {
+        // The LRO poll URL mirrors gemini-cli getOperationUrl: `${base}/${name}`
+        // where base already includes the `v1internal` segment.
+        var consecutiveErrors = 0
         for (i in 0 until 24) {
             delay(5000)
             try {
                 val conn = URL("https://cloudcode-pa.googleapis.com/v1internal/$operationName").openConnection() as HttpURLConnection
                 conn.setRequestProperty("Authorization", "Bearer $token")
                 conn.setRequestProperty("User-Agent", USER_AGENT)
-                val body = if (conn.responseCode == 200) conn.inputStream.bufferedReader().readText() else null
+                val code = conn.responseCode
+                val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                    ?.bufferedReader()?.readText() ?: ""
                 conn.disconnect()
-                if (body != null) {
-                    val json = JSONObject(body)
-                    if (json.optBoolean("done")) {
-                        return operationProject(json)
+                if (code !in 200..299) {
+                    consecutiveErrors++
+                    AppLogger.warning(TAG, "LRO poll $i: HTTP $code ${body.take(200)}")
+                    if (consecutiveErrors >= 4) {
+                        throw CodeAssistProvisioningException(
+                            "Lost track of the Gemini Code Assist onboarding (HTTP $code). " +
+                                "Try signing in again, or use an AI Studio API key instead.",
+                        )
                     }
+                    continue
                 }
-            } catch (_: Exception) {}
+                consecutiveErrors = 0
+                val json = JSONObject(body)
+                if (json.optBoolean("done")) {
+                    return operationProject(json)
+                }
+            } catch (e: CodeAssistProvisioningException) {
+                throw e
+            } catch (e: Exception) {
+                Log.d(TAG, "LRO poll $i transient: ${e.message}")
+            }
         }
         return null
     }

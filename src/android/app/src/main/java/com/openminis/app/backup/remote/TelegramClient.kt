@@ -163,12 +163,31 @@ class TelegramClient(@Suppress("unused") private val context: Context) {
         val result = try { JSONObject(text).optJSONObject("result") } catch (_: Exception) { null }
         if (code !in 200..299 || result == null) {
             val desc = runCatching { JSONObject(text).optString("description") }.getOrNull()?.takeIf { it.isNotEmpty() } ?: "HTTP $code"
-            throw TelegramException("Telegram upload failed: $desc")
+            throw TelegramException("Telegram upload failed: ${friendlySendError(desc)}")
         }
         val doc = result.optJSONObject("document")
         val fileId = doc?.optString("file_id")?.takeIf { it.isNotEmpty() }
             ?: throw TelegramException("Telegram upload returned no file id.")
         return fileId to result.optInt("message_id", -1)
+    }
+
+    /**
+     * Translate Telegram's terse 403/400 send failures into the fix the user
+     * needs. The "can't send messages to the bot" case is the classic
+     * wrong-destination setup: the chat ID points at A BOT (usually the bot
+     * itself) — bots are silent to each other by design.
+     */
+    private fun friendlySendError(desc: String): String = when {
+        desc.contains("can't send messages to the bot", ignoreCase = true) ||
+            desc.contains("bots can't send messages to bots", ignoreCase = true) ->
+            "$desc. The chat ID points at a bot — use YOUR OWN user ID " +
+                "(message the bot once, then tap 'Find my chat ID' or check @userinfobot), " +
+                "or a group chat the bot is a member of."
+        desc.contains("chat not found", ignoreCase = true) ->
+            "$desc — the bot can't see that chat. Message the bot once first (or add it to the group)."
+        desc.contains("bot was blocked", ignoreCase = true) ->
+            "$desc — unblock the bot in Telegram, then retry."
+        else -> desc
     }
 
     /** Resolve a file_id to bytes streamed into [sink]. Returns bytes written. */
@@ -299,9 +318,11 @@ class TelegramClient(@Suppress("unused") private val context: Context) {
 
     /**
      * Validate a bot token + chat id before saving the destination: getMe
-     * proves the token, getChat proves the bot can actually SEE the chat —
-     * the missing-invite failure is otherwise invisible until the first
-     * backup silently fails.
+     * proves the token, getChat proves the bot can actually SEE the chat, and
+     * a real test sendMessage proves the bot may SPEAK in it — the trio of
+     * permissions every backup needs. A wrong destination (chat id = a bot,
+     * bot blocked, bot not in the group) now fails HERE with Telegram's real
+     * reason, not three screens later as "can't upload".
      *
      * Returns the NORMALIZED token (BotFather "bot" prefix, quotes and
      * whitespace stripped) — callers must persist THIS value, not the raw
@@ -319,9 +340,72 @@ class TelegramClient(@Suppress("unused") private val context: Context) {
         val me = api(clean, "getMe", JSONObject())
         val botName = me.optString("username").ifEmpty { "?" }
         val chat = api(clean, "getChat", JSONObject().put("chat_id", chatId))
+        // The #1 misconfiguration seen in the wild: the destination chat id is
+        // a BOT's id (usually the bot itself — the ids look similar to a user
+        // id). getChat answers fine for a bot chat, so without this check the
+        // destination "connects" and every backup then 403s at upload time.
+        if (chat.optBoolean("is_bot", false)) {
+            throw TelegramException(
+                "That chat ID belongs to a bot, and bots can't message each other. " +
+                    "Send any message to your bot from YOUR account, then use your own " +
+                    "user ID — tap 'Find my chat ID' or ask @userinfobot.",
+            )
+        }
         val title = chat.optString("title").ifEmpty { chat.optString("first_name").ifEmpty { chatId } }
-        AppLogger.info(TAG, "[Telegram] verified bot=@$botName chat=$title")
+        // The send-proof: if this chat is a group the bot wasn't added to, or
+        // the user blocked the bot, THIS is where it surfaces.
+        api(
+            clean, "sendMessage",
+            JSONObject()
+                .put("chat_id", chatId)
+                .put("text", "Minis backup connected — packages will be stored in this chat.")
+                .put("disable_notification", true),
+        )
+        AppLogger.info(TAG, "[Telegram] verified bot=@$botName chat=$title (test message sent)")
         return clean
+    }
+
+    /**
+     * One-tap chat-ID discovery for the add-destination form: reads recent
+     * updates and returns (chat id, display label) of the latest message sent
+     * by a HUMAN to the bot. Returns null when the bot has no human messages
+     * yet — the caller tells the user to send /start first. Bot-authored
+     * updates are filtered out so a previous test message can never pin the
+     * destination to a bot (the verify-time is_bot check backs this up).
+     */
+    fun detectChatId(token: String): Pair<String, String>? {
+        val clean = normalizeBotToken(token)
+        if (!BOT_TOKEN_SHAPE.matches(clean)) {
+            throw TelegramException(
+                "Paste a bot token first — then 'Find my chat ID' can detect the chat for you.",
+            )
+        }
+        val updates = api(clean, "getUpdates", JSONObject().put("limit", 100))
+        val result = updates.optJSONArray("result") ?: return null
+        var best: Pair<String, String>? = null
+        for (i in 0 until result.length()) {
+            val update = result.optJSONObject(i) ?: continue
+            val message = update.optJSONObject("message")
+                ?: update.optJSONObject("edited_message")
+                ?: update.optJSONObject("channel_post")
+                ?: continue
+            val from = message.optJSONObject("from")
+            // A bot cannot be the destination — skip its own messages and any
+            // other bot's (e.g. a bot posting in a group).
+            if (from != null && from.optBoolean("is_bot", false)) continue
+            val chat = message.optJSONObject("chat") ?: continue
+            val id = chat.optString("id").takeIf { it.isNotEmpty() }
+                ?: chat.optString("username").takeIf { it.isNotEmpty() }
+                ?: continue
+            val label = chat.optString("title").ifEmpty {
+                listOfNotNull(
+                    chat.optString("first_name").takeIf { n -> n.isNotEmpty() },
+                    chat.optString("last_name").takeIf { n -> n.isNotEmpty() },
+                ).joinToString(" ").ifEmpty { chat.optString("username").ifEmpty { id } }
+            }
+            best = id to label // last (most recent) human message wins
+        }
+        return best
     }
 
     /**

@@ -75,7 +75,16 @@ abstract class OAuthManager(
         /** Create the appropriate OAuthManager for a provider instance. */
         fun forInstance(context: Context, instance: com.openminis.app.data.model.ProviderInstance): OAuthManager? {
             return when (instance.providerType) {
-                com.openminis.app.data.model.ProviderType.anthropic -> ClaudeOAuthManager(context, instance.id)
+                com.openminis.app.data.model.ProviderType.anthropic ->
+                    // [T-android-zai-glm-oauth] Anthropic instances pointed at
+                    // z.ai / ZCode / bigmodel use the z.ai coding-plan OAuth
+                    // (minted long-lived key, no refresh); everything else is
+                    // Claude Code OAuth.
+                    if (instance.customBaseURL?.let { ZaiOAuthManager.isZaiCompatBaseURL(it) } == true) {
+                        ZaiOAuthManager(context, instance.id)
+                    } else {
+                        ClaudeOAuthManager(context, instance.id)
+                    }
                 com.openminis.app.data.model.ProviderType.openAI -> OpenAIOAuthManager(context, instance.id)
                 com.openminis.app.data.model.ProviderType.xAI -> XAIOAuthManager(context, instance.id)
                 com.openminis.app.data.model.ProviderType.kimiCode -> KimiOAuthManager(context, instance.id)

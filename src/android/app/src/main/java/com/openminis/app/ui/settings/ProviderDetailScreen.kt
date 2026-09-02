@@ -882,10 +882,22 @@ private fun OAuthCredentialBlock(
                                     context, instance.id, providerRepository,
                                     onDeviceCode = { auth -> kimiDeviceAuth = auth },
                                 ).also { kimiDeviceAuth = null }
+                            // [T-android-zai-glm-oauth] A z.ai-based Anthropic
+                            // instance re-auths through the GLM Coding Plan
+                            // flow, never Claude Code OAuth (its tokens would
+                            // be invalid against api.z.ai).
                             ProviderType.anthropic ->
-                                com.openminis.app.auth.ClaudeOAuthManager.login(
-                                    context, instance.id, providerRepository,
-                                )
+                                if (instance.customBaseURL?.let {
+                                        com.openminis.app.auth.ZaiOAuthManager.isZaiCompatBaseURL(it)
+                                    } == true) {
+                                    com.openminis.app.auth.ZaiOAuthManager.login(
+                                        context, instance.id, providerRepository,
+                                    )
+                                } else {
+                                    com.openminis.app.auth.ClaudeOAuthManager.login(
+                                        context, instance.id, providerRepository,
+                                    )
+                                }
                             // [T-android-gemini-oauth] Re-run Google sign-in on
                             // an existing Gemini instance (token revoked, wrong
                             // account, or switching from API key to OAuth).

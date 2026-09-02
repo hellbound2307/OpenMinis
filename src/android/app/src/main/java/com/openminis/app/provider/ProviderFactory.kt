@@ -33,11 +33,28 @@ object ProviderFactory {
         val basePath = instance.effectiveBaseURL
         val provider: LLMProvider = when (instance.providerType) {
             ProviderType.anthropic -> {
-                val isOAuth = instance.credentialType == ProviderCredential.oauth
-                // [T-provider-custom-user-agent] Only meaningful for custom-base
-                // (relay) instances; on the official direct path it's null.
-                if (basePath != null) AnthropicProvider(apiKey, model, basePath, isOAuth = isOAuth, customUserAgent = instance.customUserAgent)
-                else AnthropicProvider(apiKey, model, isOAuth = isOAuth)
+                // [T-android-zai-glm-oauth] z.ai / ZCode GLM Coding Plan
+                // instances are Anthropic-protocol instances whose base URL
+                // points at api.z.ai/api/anthropic (or bigmodel.cn). Their
+                // OAuth login mints a STANDARD coding-plan API key stored as
+                // the instance api key — authenticate with x-api-key, never
+                // with the Anthropic OAuth Bearer shape (Claude tokens are
+                // only valid against api.anthropic.com).
+                val isZaiCompat = basePath != null &&
+                    com.openminis.app.auth.ZaiOAuthManager.isZaiCompatBaseURL(basePath)
+                if (isZaiCompat) {
+                    if (basePath != null) {
+                        AnthropicProvider(apiKey, model, basePath, isOAuth = false, customUserAgent = instance.customUserAgent)
+                    } else {
+                        AnthropicProvider(apiKey, model, isOAuth = false)
+                    }
+                } else {
+                    val isOAuth = instance.credentialType == ProviderCredential.oauth
+                    // [T-provider-custom-user-agent] Only meaningful for custom-base
+                    // (relay) instances; on the official direct path it's null.
+                    if (basePath != null) AnthropicProvider(apiKey, model, basePath, isOAuth = isOAuth, customUserAgent = instance.customUserAgent)
+                    else AnthropicProvider(apiKey, model, isOAuth = isOAuth)
+                }
             }
             ProviderType.gemini -> {
                 // [T-android-gemini-oauth] Two credential modes:
@@ -66,14 +83,12 @@ object ProviderFactory {
                                 ?: throw com.openminis.app.data.model.LLMError.InvalidApiKey()
                         },
                         gcpProjectProvider = {
-                            if (oauthManager.discoverProjectIfNeeded()) {
-                                oauthManager.gcpProjectId
-                            } else {
-                                throw com.openminis.app.data.model.LLMError.ProviderError(
-                                    "Google sign-in succeeded, but no Gemini Code Assist project " +
-                                        "could be provisioned for this account. Try signing in again, " +
-                                        "or configure the provider with an API key instead.",
-                                )
+                            try {
+                                oauthManager.resolveProject()
+                            } catch (e: com.openminis.app.auth.GeminiOAuthManager.CodeAssistProvisioningException) {
+                                // Google's real reason (HTTP status, error message,
+                                // ineligibility text) reaches the chat error bubble.
+                                throw com.openminis.app.data.model.LLMError.ProviderError(e.message ?: "Gemini Code Assist project could not be provisioned.")
                             }
                         },
                     )

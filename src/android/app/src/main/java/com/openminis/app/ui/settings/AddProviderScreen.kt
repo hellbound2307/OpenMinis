@@ -209,19 +209,17 @@ private fun providerIcon(type: ProviderType): Pair<ImageVector, Color> = when (t
 private fun availableCredentials(type: ProviderType): List<ProviderCredential> {
     return when (type) {
         ProviderType.openRouter -> listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
-        // [T-android-zai-preset] Anthropic-protocol OAuth is Claude Code
-        // OAuth — the issued tokens are only valid against
-        // api.anthropic.com, and every request must carry the build-time
-        // ANTHROPIC_OAUTH_IDENTIFIER_PROMPT. When that prompt is empty (the
-        // public mirror default), OAuth requests can never succeed: hide the
-        // option instead of letting users create a provider that only
-        // produces errors. Third-party Claude-compatible endpoints (z.ai,
-        // GLM, …) authenticate with an API key in every case.
+        // [T-android-zai-glm-oauth] Anthropic-protocol OAuth comes in TWO
+        // flavors: Claude Code OAuth (tokens only valid against
+        // api.anthropic.com, requires the build-time
+        // ANTHROPIC_OAUTH_IDENTIFIER_PROMPT) and the z.ai GLM Coding Plan
+        // sign-in (mints a standard coding-plan key against
+        // api.z.ai/api/anthropic). The z.ai flavor is always offered — it is
+        // the only OAuth that works in mirror builds — and never conflicts
+        // with the gated Claude path.
         ProviderType.anthropic -> buildList {
             add(ProviderCredential.apiKey)
-            if (com.openminis.app.BuildConfig.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT.isNotEmpty()) {
-                add(ProviderCredential.oauth)
-            }
+            add(ProviderCredential.oauth)
         }
         ProviderType.openAI -> listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
         ProviderType.gemini -> listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
@@ -393,7 +391,7 @@ private fun apiKeyDescription(type: ProviderType): String = when (type) {
 }
 
 private fun oauthDescription(type: ProviderType): String = when (type) {
-    ProviderType.anthropic -> "Sign in with your Claude account"
+    ProviderType.anthropic -> "Sign in with your Claude account, or with z.ai for the GLM Coding Plan"
     ProviderType.gemini -> "Sign in with Google for Cloud Code Assist"
     ProviderType.openAI -> "Sign in with OpenAI Codex"
     ProviderType.xAI -> "Sign in with xAI (requires SuperGrok or X Premium+)"
@@ -731,6 +729,14 @@ private fun ColumnScope.OAuthConfigSection(
     var customBaseURL by remember { mutableStateOf("") }
     var appendV1Suffix by remember { mutableStateOf(providerType != ProviderType.gemini) }
 
+    // [T-android-zai-glm-oauth] Which Anthropic OAuth flavor ran: false =
+    // Claude Code OAuth, true = z.ai GLM Coding Plan sign-in. Decides the
+    // saved instance's base URL (see the authenticated-state save below).
+    var zaiFlavor by remember { mutableStateOf(false) }
+    val claudeOAuthAvailable = providerType != ProviderType.anthropic ||
+        com.openminis.app.BuildConfig.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT.isNotEmpty()
+    val zaiOAuthAvailable = providerType == ProviderType.anthropic
+
     val signInLabel = when (providerType) {
         ProviderType.anthropic -> "Sign in with Claude"
         ProviderType.gemini -> "Sign in with Google"
@@ -798,6 +804,11 @@ private fun ColumnScope.OAuthConfigSection(
                     label = label.ifBlank { providerType.displayName },
                     providerType = providerType,
                     credentialType = ProviderCredential.oauth,
+                    // [T-android-zai-glm-oauth] The z.ai flavor NEEDS its base
+                    // URL saved — it is both the inference endpoint AND the
+                    // marker that routes requests (ProviderFactory) and token
+                    // calls (OAuthManager.forInstance) to ZaiOAuthManager.
+                    customBaseURL = if (zaiFlavor) com.openminis.app.auth.ZaiOAuthManager.ANTHROPIC_API_BASE else null,
                 )
                 providerRepository.addInstance(instance)
                 // Auto-refresh models (fetches from API or falls back to models.dev)
@@ -812,99 +823,132 @@ private fun ColumnScope.OAuthConfigSection(
         }
     } else {
         // ── Sign In ────────────────────────────────────────────────────
+        // [T-android-zai-glm-oauth] Shared launch body for every flavor —
+        // both buttons below funnel through here with their flavor set.
+        val runSignIn: (Boolean) -> Unit = { zai ->
+            zaiFlavor = zai
+            isAuthenticating = true
+            errorMessage = null
+            kimiLoginJob = scope.launch {
+                try {
+                    when (providerType) {
+                        ProviderType.kimiCode -> {
+                            // [T-kimi-oauth] Device-code flow: the
+                            // onDeviceCode callback flips the dialog
+                            // state as soon as the code is issued;
+                            // login() keeps polling underneath and
+                            // returns once the user authorizes.
+                            val key = com.openminis.app.auth.KimiOAuthManager.login(
+                                context, pendingInstanceId, providerRepository,
+                                onDeviceCode = { auth -> kimiDeviceAuth = auth },
+                            )
+                            kimiDeviceAuth = null
+                            maskedToken = maskOAuthToken(key)
+                        }
+                        ProviderType.openRouter -> {
+                            val key = OpenRouterOAuthManager.login(context, pendingInstanceId, providerRepository)
+                            maskedToken = maskOAuthToken(key)
+                        }
+                        ProviderType.anthropic -> {
+                            if (zai) {
+                                // z.ai GLM Coding Plan: browser authorize →
+                                // poll → a long-lived coding-plan API key is
+                                // minted server-side. No callback server, no
+                                // loopback port, no key pasting.
+                                val key = com.openminis.app.auth.ZaiOAuthManager.login(context, pendingInstanceId, providerRepository)
+                                maskedToken = maskOAuthToken(key)
+                            } else {
+                                val key = com.openminis.app.auth.ClaudeOAuthManager.login(context, pendingInstanceId, providerRepository)
+                                maskedToken = maskOAuthToken(key)
+                            }
+                        }
+                        ProviderType.gemini -> {
+                            // [T-android-gemini-oauth] Google sign-in
+                            // → Code Assist tokens; on request time
+                            // GeminiProvider routes through
+                            // cloudcode-pa.googleapis.com so a Gemini
+                            // Pro / AI Pro subscription works without
+                            // an API key.
+                            val key = com.openminis.app.auth.GeminiOAuthManager.login(context, pendingInstanceId, providerRepository)
+                            maskedToken = maskOAuthToken(key)
+                        }
+                        ProviderType.openAI -> {
+                            val key = OpenAIOAuthManager.login(context, pendingInstanceId, providerRepository)
+                            maskedToken = maskOAuthToken(key)
+                        }
+                        ProviderType.xAI -> {
+                            val key = com.openminis.app.auth.XAIOAuthManager.login(context, pendingInstanceId, providerRepository)
+                            maskedToken = maskOAuthToken(key)
+                        }
+                        else -> {
+                            throw Exception("OAuth not yet implemented for ${providerType.displayName}")
+                        }
+                    }
+                    isAuthenticated = true
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    // [T-kimi-oauth] User dismissed the device-code
+                    // dialog — not an error; just reset the button.
+                    kimiDeviceAuth = null
+                    throw e
+                } catch (e: Exception) {
+                    kimiDeviceAuth = null
+                    // T-android-codex-oauth-dns: surface a
+                    // localized "check network / proxy" hint
+                    // when the OAuth manager flags a DNS /
+                    // socket-timeout failure. Other failures
+                    // (4xx, token format) keep their raw
+                    // message so we don't lose diagnostic
+                    // signal.
+                    errorMessage = if (e is com.openminis.app.auth.OAuthNetworkUnreachableException) {
+                        context.getString(R.string.add_provider_oauth_network_unreachable)
+                    } else {
+                        e.message ?: "Authentication failed"
+                    }
+                } finally {
+                    isAuthenticating = false
+                }
+            }
+        }
         SettingsSection(
             header = stringResource(R.string.provider_detail_sign_in),
             footer = stringResource(R.string.add_provider_opens_the_provider_s_web_sign_in_flow_af),
         ) {
             SettingsCardBlock {
-                MinisButton(
-                    onClick = {
-                        isAuthenticating = true
-                        errorMessage = null
-                        kimiLoginJob = scope.launch {
-                            try {
-                                when (providerType) {
-                                    ProviderType.kimiCode -> {
-                                        // [T-kimi-oauth] Device-code flow: the
-                                        // onDeviceCode callback flips the dialog
-                                        // state as soon as the code is issued;
-                                        // login() keeps polling underneath and
-                                        // returns once the user authorizes.
-                                        val key = com.openminis.app.auth.KimiOAuthManager.login(
-                                            context, pendingInstanceId, providerRepository,
-                                            onDeviceCode = { auth -> kimiDeviceAuth = auth },
-                                        )
-                                        kimiDeviceAuth = null
-                                        maskedToken = maskOAuthToken(key)
-                                    }
-                                    ProviderType.openRouter -> {
-                                        val key = OpenRouterOAuthManager.login(context, pendingInstanceId, providerRepository)
-                                        maskedToken = maskOAuthToken(key)
-                                    }
-                                    ProviderType.anthropic -> {
-                                        val key = com.openminis.app.auth.ClaudeOAuthManager.login(context, pendingInstanceId, providerRepository)
-                                        maskedToken = maskOAuthToken(key)
-                                    }
-                                    ProviderType.gemini -> {
-                                        // [T-android-gemini-oauth] Google sign-in
-                                        // → Code Assist tokens; on request time
-                                        // GeminiProvider routes through
-                                        // cloudcode-pa.googleapis.com so a Gemini
-                                        // Pro / AI Pro subscription works without
-                                        // an API key.
-                                        val key = com.openminis.app.auth.GeminiOAuthManager.login(context, pendingInstanceId, providerRepository)
-                                        maskedToken = maskOAuthToken(key)
-                                    }
-                                    ProviderType.openAI -> {
-                                        val key = OpenAIOAuthManager.login(context, pendingInstanceId, providerRepository)
-                                        maskedToken = maskOAuthToken(key)
-                                    }
-                                    ProviderType.xAI -> {
-                                        val key = com.openminis.app.auth.XAIOAuthManager.login(context, pendingInstanceId, providerRepository)
-                                        maskedToken = maskOAuthToken(key)
-                                    }
-                                    else -> {
-                                        throw Exception("OAuth not yet implemented for ${providerType.displayName}")
-                                    }
-                                }
-                                isAuthenticated = true
-                            } catch (e: kotlinx.coroutines.CancellationException) {
-                                // [T-kimi-oauth] User dismissed the device-code
-                                // dialog — not an error; just reset the button.
-                                kimiDeviceAuth = null
-                                throw e
-                            } catch (e: Exception) {
-                                kimiDeviceAuth = null
-                                // T-android-codex-oauth-dns: surface a
-                                // localized "check network / proxy" hint
-                                // when the OAuth manager flags a DNS /
-                                // socket-timeout failure. Other failures
-                                // (4xx, token format) keep their raw
-                                // message so we don't lose diagnostic
-                                // signal.
-                                errorMessage = if (e is com.openminis.app.auth.OAuthNetworkUnreachableException) {
-                                    context.getString(R.string.add_provider_oauth_network_unreachable)
-                                } else {
-                                    e.message ?: "Authentication failed"
-                                }
-                            } finally {
-                                isAuthenticating = false
-                            }
+                if (claudeOAuthAvailable) {
+                    MinisButton(
+                        onClick = { runSignIn(false) },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isAuthenticating,
+                    ) {
+                        if (isAuthenticating && !zaiFlavor) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                strokeWidth = 2.dp,
+                            )
+                            Spacer(Modifier.width(8.dp))
                         }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !isAuthenticating,
-                ) {
-                    if (isAuthenticating) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            strokeWidth = 2.dp,
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(stringResource(R.string.add_provider_signing_in))
-                    } else {
                         Text(signInLabel)
+                    }
+                }
+                if (zaiOAuthAvailable) {
+                    if (claudeOAuthAvailable) {
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    MinisButton(
+                        onClick = { runSignIn(true) },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isAuthenticating,
+                    ) {
+                        if (isAuthenticating && zaiFlavor) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                strokeWidth = 2.dp,
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text("Sign in with Z.ai (GLM Coding Plan)")
                     }
                 }
                 if (errorMessage != null) {

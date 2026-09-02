@@ -53,8 +53,52 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
     private val _certificateRejected = MutableStateFlow(false)
     val certificateRejected: StateFlow<Boolean> = _certificateRejected.asStateFlow()
 
+    /**
+     * [T-android-telegram-detect-chat] Result of the one-tap "Find my chat ID"
+     * helper on the Telegram add form. The form fills the chat-ID field from
+     * this and clears it — never persisted anywhere else.
+     */
+    data class TelegramDetect(val chatId: String, val label: String)
+
+    private val _telegramDetect = MutableStateFlow<TelegramDetect?>(null)
+    val telegramDetect: StateFlow<TelegramDetect?> = _telegramDetect.asStateFlow()
+
     fun refresh() { _remotes.value = store.remotes }
     fun clearError() { _error.value = null }
+
+    /** Consume the pending chat-ID detection (the form has applied it). */
+    fun clearTelegramDetect() { _telegramDetect.value = null }
+
+    /**
+     * [T-android-telegram-detect-chat] One-tap chat-ID discovery: read the
+     * bot's recent updates and surface the latest HUMAN sender's chat. This
+     * kills the most common Telegram setup failure — pasting the bot's own ID
+     * as the destination ("Forbidden: the bot can't send messages to the bot")
+     * — by filling in the correct id from the message the user just sent.
+     */
+    fun detectTelegramChatId(token: String) {
+        if (_busy.value) return
+        _busy.value = true
+        _error.value = null
+        _telegramDetect.value = null
+        viewModelScope.launch {
+            try {
+                val found = withContext(Dispatchers.IO) {
+                    TelegramClient(getApplication()).detectChatId(token)
+                }
+                if (found == null) {
+                    _error.value = "No messages found. Open Telegram, send any message (or /start) to your bot, then try again."
+                } else {
+                    _telegramDetect.value = TelegramDetect(found.first, found.second)
+                }
+            } catch (e: Exception) {
+                AppLogger.error(TAG, "[Telegram] chat-id detect failed: ${e.message}")
+                _error.value = e.message ?: "Could not detect the chat ID."
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
 
     /** Reset the certificate prompt when the user edits the form or backs out. */
     fun clearCertificateRejection() { _certificateRejected.value = false }

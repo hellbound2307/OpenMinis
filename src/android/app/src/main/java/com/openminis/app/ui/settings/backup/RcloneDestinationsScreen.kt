@@ -278,13 +278,35 @@ internal fun AddServerForm(
             Spacer(Modifier.height(8.dp))
             Text(
                 "Setup: message @BotFather → /newbot → paste its token here. Then send any " +
-                    "message to your new bot and paste your chat ID (get it from @userinfobot). " +
-                    "Packages are stored as files in that chat — encrypted before upload when a " +
-                    "passphrase is set, so only you can read them.",
+                    "message to your new bot from YOUR account and tap 'Find my chat ID' below " +
+                    "(or paste your own user ID from @userinfobot). Packages are stored as files " +
+                    "in that chat — encrypted before upload when a passphrase is set, so only you " +
+                    "can read them. The chat must NOT be the bot itself: bots can't message bots.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
             )
+            // [T-android-telegram-detect-chat] One-tap detection: read the
+            // bot's recent updates, take the latest human sender, fill the
+            // chat-ID field. Removes the guesswork that produced the classic
+            // "Forbidden: the bot can't send messages to the bot" upload
+            // failure (destination = a bot's id).
+            val telegramDetect by vm.telegramDetect.collectAsState()
+            androidx.compose.runtime.LaunchedEffect(telegramDetect) {
+                telegramDetect?.let { found ->
+                    fieldValues["chat_id"] = found.chatId
+                    vm.clearTelegramDetect()
+                }
+            }
+            androidx.compose.material3.TextButton(
+                onClick = { vm.detectTelegramChatId(fieldValues["bot_token"] ?: "") },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    if (busy) "Looking for your chat…" else "Find my chat ID (send the bot a message first)",
+                )
+            }
         }
 
         if (!isTelegram) {
