@@ -38,6 +38,23 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
 
         private fun mutexFor(instanceId: String): Mutex =
             refreshMutexes.getOrPut(instanceId) { Mutex() }
+
+        /**
+         * Static helper mirroring [ClaudeOAuthManager.login] /
+         * [OpenAIOAuthManager.login] — full sign-in flow, token persisted
+         * through [com.openminis.app.data.repository.ProviderRepository.saveApiKey],
+         * access token returned.
+         */
+        suspend fun login(
+            context: Context,
+            instanceId: String,
+            providerRepository: com.openminis.app.data.repository.ProviderRepository,
+        ): String {
+            val manager = GeminiOAuthManager(context, instanceId)
+            val token = manager.performLogin(context)
+            providerRepository.saveApiKey(instanceId, token)
+            return token
+        }
     }
 
     /**
@@ -85,22 +102,6 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
     private var lastLoginState: String? = null
 
     private var loginCallbackServer: OAuthCallbackServer? = null
-
-    /**
-     * Static helper mirroring [ClaudeOAuthManager.login] /
-     * [OpenAIOAuthManager.login] — full sign-in flow, token persisted through
-     * [ProviderRepository.saveApiKey], access token returned.
-     */
-    suspend fun login(
-        context: Context,
-        instanceId: String,
-        providerRepository: com.openminis.app.data.repository.ProviderRepository,
-    ): String {
-        val manager = GeminiOAuthManager(context, instanceId)
-        val token = manager.performLogin(context)
-        providerRepository.saveApiKey(instanceId, token)
-        return token
-    }
 
     /**
      * Perform the full OAuth login flow: loopback callback server on

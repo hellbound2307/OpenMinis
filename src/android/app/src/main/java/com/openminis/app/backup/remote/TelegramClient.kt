@@ -446,7 +446,7 @@ class TelegramClient(@Suppress("unused") private val context: Context) {
             val tee = object : java.io.OutputStream() {
                 override fun write(b: Int) {
                     out.write(b)
-                    digest.update(b)
+                    digest.update(b.toByte())
                 }
                 override fun write(b: ByteArray, off: Int, len: Int) {
                     out.write(b, off, len)
