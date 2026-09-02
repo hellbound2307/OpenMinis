@@ -254,8 +254,7 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
             conn.setRequestProperty("Content-Type", "application/json")
             conn.doOutput = true
             conn.outputStream.write(
-                """{"tierId":"$tierId","licenseState":"LICENSE_STATE_UNSPECIFIED",""" +
-                    """"metadata":{"ideType":"IDE_UNSPECIFIED","pluginType":"GEMINI"}}""".toByteArray(),
+                """{"tierId":"$tierId","licenseState":"LICENSE_STATE_UNSPECIFIED","metadata":{"ideType":"IDE_UNSPECIFIED","pluginType":"GEMINI"}}""".toByteArray(),
             )
             val responseCode = conn.responseCode
             val body = if (responseCode == 200) conn.inputStream.bufferedReader().readText() else null
