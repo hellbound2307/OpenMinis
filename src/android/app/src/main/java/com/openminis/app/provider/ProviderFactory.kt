@@ -40,8 +40,48 @@ object ProviderFactory {
                 else AnthropicProvider(apiKey, model, isOAuth = isOAuth)
             }
             ProviderType.gemini -> {
-                if (basePath != null) GeminiProvider(apiKey, model, basePath)
-                else GeminiProvider(apiKey, model)
+                // [T-android-gemini-oauth] Two credential modes:
+                //   - OAuth (Gemini Pro / Google AI Pro): Bearer token via
+                //     GeminiOAuthManager + Code Assist project discovery —
+                //     requests route through cloudcode-pa.googleapis.com in
+                //     the Gemini CLI envelope, no API key needed.
+                //   - API key (AI Studio): generativelanguage ?key= path.
+                // A manual bearer token bypasses the OAuth flow and is sent
+                // verbatim as the API key, matching the other providers'
+                // manual-token behavior.
+                val manualBearer = if (context != null &&
+                    instance.credentialType == ProviderCredential.oauth) {
+                    com.openminis.app.auth.OAuthManager.forInstance(context, instance)?.loadManualBearerToken()
+                } else null
+                if (instance.credentialType == ProviderCredential.oauth && manualBearer.isNullOrEmpty()
+                    && context != null) {
+                    val oauthManager = com.openminis.app.auth.GeminiOAuthManager(context, instance.id)
+                    GeminiProvider(
+                        apiKey = apiKey,
+                        model = model,
+                        basePath = basePath
+                            ?: "https://generativelanguage.googleapis.com/v1beta",
+                        oauthTokenProvider = {
+                            oauthManager.validAccessToken()
+                                ?: throw com.openminis.app.data.model.LLMError.InvalidApiKey()
+                        },
+                        gcpProjectProvider = {
+                            if (oauthManager.discoverProjectIfNeeded()) {
+                                oauthManager.gcpProjectId
+                            } else {
+                                throw com.openminis.app.data.model.LLMError.ProviderError(
+                                    "Google sign-in succeeded, but no Gemini Code Assist project " +
+                                        "could be provisioned for this account. Try signing in again, " +
+                                        "or configure the provider with an API key instead.",
+                                )
+                            }
+                        },
+                    )
+                } else {
+                    val effectiveKey = if (!manualBearer.isNullOrEmpty()) manualBearer else apiKey
+                    if (basePath != null) GeminiProvider(effectiveKey, model, basePath)
+                    else GeminiProvider(effectiveKey, model)
+                }
             }
             // [T-android-provider-type-parity] openAIResponses shares this
             // branch: on iOS it is "OpenAI with forceResponsesAPI = true", and

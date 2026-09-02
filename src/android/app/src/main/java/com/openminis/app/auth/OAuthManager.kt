@@ -55,9 +55,9 @@ abstract class OAuthManager(
          * completed login or a user-pasted manual bearer.
          *
          * Static on purpose. Callers (notably provider routing) need a cheap
-         * synchronous yes/no and must not depend on [forInstance], which
-         * deliberately omits some provider types (gemini) and would report
-         * those as uncredentialed. Token storage is keyed purely by instance
+         * synchronous yes/no and must not depend on [forInstance], which used
+         * to deliberately omit some provider types (gemini) back when those
+         * had no OAuth flow. Token storage is keyed purely by instance
          * id, so reading the prefs directly is both correct and complete.
          *
          * Presence only — this does NOT validate or refresh the token. An
@@ -79,6 +79,11 @@ abstract class OAuthManager(
                 com.openminis.app.data.model.ProviderType.openAI -> OpenAIOAuthManager(context, instance.id)
                 com.openminis.app.data.model.ProviderType.xAI -> XAIOAuthManager(context, instance.id)
                 com.openminis.app.data.model.ProviderType.kimiCode -> KimiOAuthManager(context, instance.id)
+                // [T-android-gemini-oauth] Gemini OAuth is fully wired now
+                // (sign-in UI + Cloud Code Assist request path), so it joins
+                // the dispatch: logout, manual-bearer reads and token
+                // refreshes route here like every other provider.
+                com.openminis.app.data.model.ProviderType.gemini -> GeminiOAuthManager(context, instance.id)
                 else -> null
             }
         }

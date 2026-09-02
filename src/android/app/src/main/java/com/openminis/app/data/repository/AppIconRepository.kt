@@ -29,7 +29,9 @@ object AppIconRepository {
     private const val TAG = "AppIconRepository"
     private const val PREFS = "app_icon_prefs"
     private const val KEY_SELECTED_ID = "selected_icon_id"
-    private const val PACKAGE_NAME = "com.openminis.app"
+    // Must match the install identity (applicationId in build.gradle.kts) —
+    // PackageManager toggles activity-alias components by package+class.
+    private const val PACKAGE_NAME = "com.openminis.app.x"
 
     enum class Variant(val id: String, val aliasClass: String) {
         Auto("auto", "$PACKAGE_NAME.MainActivityIconAuto"),

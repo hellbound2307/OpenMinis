@@ -13,3 +13,11 @@
 # the same endpoint declare the same identifier, e.g.
 # https://github.com/Wei-Shaw/claude-relay-service
 ANTHROPIC_OAUTH_IDENTIFIER_PROMPT=
+
+# Google (Gemini) OAuth client for "Sign in with Google". Empty means the
+# public Gemini CLI installed-app client is used (the same client the flow
+# targets by default; the installed-app secret is not a confidential value —
+# Gemini CLI ships it in its own public repository). Set both values only if
+# you want to route sign-ins through your own GCP OAuth client.
+GOOGLE_OAUTH_CLIENT_ID=
+GOOGLE_OAUTH_CLIENT_SECRET=

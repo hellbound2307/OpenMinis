@@ -457,11 +457,17 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
                     store.syncToRclone()
                     val uploader =
                         com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
+                    val telegram = com.openminis.app.backup.remote.TelegramClient(getApplication())
                     for (outcome in record.destinations.filter { it.succeeded }) {
                         val remote = store.remotes.firstOrNull { it.name == outcome.name }
                             ?: continue
-                        runCatching { uploader.deletePackage(remote, name) }
-                            .onFailure {
+                        runCatching {
+                            if (remote.backend == "telegram") {
+                                telegram.deletePackage(remote, name)
+                            } else {
+                                uploader.deletePackage(remote, name)
+                            }
+                        }.onFailure {
                                 AppLogger.error(
                                     TAG,
                                     "[Backup] deleting '$name' from '${outcome.name}' failed: ${it.message}",
@@ -496,6 +502,7 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         if (enabled.isEmpty()) return emptyList()
         store.syncToRclone()
         val uploader = com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
+        val telegram = com.openminis.app.backup.remote.TelegramClient(getApplication())
         // [T-android-backup-history] Report EVERY destination, not just the
         // failures. "Which servers did last night's backup actually reach?"
         // was unanswerable while only errors were returned.
@@ -503,9 +510,17 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         for (remote in enabled) {
             try {
                 onProgress("Sending to ${remote.name}…")
-                uploader.upload(packageFile, remote, backupId) { p ->
+                // Telegram is not an rclone backend — its destination is a
+                // chat, driven by the Bot API. Same progress contract, so the
+                // percentage line below is shared.
+                val progressSink: (com.openminis.app.backup.remote.RcloneChunkedUpload.Progress) -> Unit = { p ->
                     val pct = if (p.totalBytes > 0) (p.bytesSent * 100 / p.totalBytes) else 0
                     onProgress("Sending to ${remote.name}… $pct%")
+                }
+                if (remote.backend == "telegram") {
+                    telegram.upload(packageFile, remote, backupId, onProgress = progressSink)
+                } else {
+                    uploader.upload(packageFile, remote, backupId, onProgress = progressSink)
                 }
                 outcomes.add(
                     BackupHistory.DestinationOutcome(
@@ -615,10 +630,17 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val pkgs = withContext(Dispatchers.IO) {
-                    val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
-                    store.syncToRclone()
-                    com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
-                        .listPackages(remote)
+                    if (remote.backend == "telegram") {
+                        // Telegram keeps its package index in the pinned
+                        // message — no rclone involvement.
+                        com.openminis.app.backup.remote.TelegramClient(getApplication())
+                            .listPackages(remote)
+                    } else {
+                        val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
+                        store.syncToRclone()
+                        com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
+                            .listPackages(remote)
+                    }
                 }
                 _serverPackages.value = pkgs
                 _statusText.value = null
@@ -667,10 +689,17 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val entries = withContext(Dispatchers.IO) {
-                    val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
-                    store.syncToRclone()
-                    com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
-                        .listDirectory(remote, path)
+                    if (remote.backend == "telegram") {
+                        // No folder tree — packages are indexed in one pinned
+                        // message, so the browser side stays empty and the
+                        // package list carries everything.
+                        emptyList()
+                    } else {
+                        val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
+                        store.syncToRclone()
+                        com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
+                            .listDirectory(remote, path)
+                    }
                 }
                 _browsePath.value = path
                 _browseEntries.value = entries
@@ -783,10 +812,15 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
-                    store.syncToRclone()
-                    com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
-                        .deletePackage(remote, pkg)
+                    if (remote.backend == "telegram") {
+                        com.openminis.app.backup.remote.TelegramClient(getApplication())
+                            .deletePackage(remote, pkg.key)
+                    } else {
+                        val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
+                        store.syncToRclone()
+                        com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
+                            .deletePackage(remote, pkg)
+                    }
                 }
             } catch (e: Exception) {
                 AppLogger.error(TAG, "[Backup] delete '${pkg.displayName}' failed: ${e.message}")
@@ -813,15 +847,27 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         openJob = viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
-                    store.syncToRclone()
-                    com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
-                        .download(pkg, remote, dest, flag) { p ->
-                            _transfer.value = TransferInfo(
-                                pkg.displayName, p.bytesSent, p.totalBytes,
-                                p.bytesPerSecond, p.secondsRemaining,
-                            )
-                        }
+                    if (remote.backend == "telegram") {
+                        // Parts come from the pinned index via the Bot API;
+                        // same Progress contract as the rclone path below.
+                        com.openminis.app.backup.remote.TelegramClient(getApplication())
+                            .download(pkg, remote, dest, flag) { p ->
+                                _transfer.value = TransferInfo(
+                                    pkg.displayName, p.bytesSent, p.totalBytes,
+                                    p.bytesPerSecond, p.secondsRemaining,
+                                )
+                            }
+                    } else {
+                        val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
+                        store.syncToRclone()
+                        com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
+                            .download(pkg, remote, dest, flag) { p ->
+                                _transfer.value = TransferInfo(
+                                    pkg.displayName, p.bytesSent, p.totalBytes,
+                                    p.bytesPerSecond, p.secondsRemaining,
+                                )
+                            }
+                    }
                 }
                 _transfer.value = null
                 // Opening is its own phase with its own Cancel: unzipping a

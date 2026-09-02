@@ -33,11 +33,14 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.openminis.app"
+        // Fork identity: suffixed with .x so this build installs ALONGSIDE the
+        // official com.openminis.app release (side-by-side, no upgrade conflict).
+        // Namespace stays com.openminis.app — only the install identity changes.
+        applicationId = "com.openminis.app.x"
         minSdk = 26
         targetSdk = 35
         versionCode = 25
-        versionName = "1.13"
+        versionName = "1.13-x1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -47,6 +50,22 @@ android {
             "String",
             "ANTHROPIC_OAUTH_IDENTIFIER_PROMPT",
             "\"${customizationValue("ANTHROPIC_OAUTH_IDENTIFIER_PROMPT")}\""
+        )
+
+        // Google (Gemini) OAuth client for "Sign in with Google" — routes
+        // Gemini Pro / AI Pro subscriptions through the Code Assist API.
+        // Defaults to the public Gemini CLI installed-app client (the same
+        // client id the OAuth flow already uses); both values are overridable
+        // via provider-customization.properties for a dedicated GCP client.
+        buildConfigField(
+            "String",
+            "GOOGLE_OAUTH_CLIENT_ID",
+            "\"${customizationValue("GOOGLE_OAUTH_CLIENT_ID").ifEmpty { "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com" }}\""
+        )
+        buildConfigField(
+            "String",
+            "GOOGLE_OAUTH_CLIENT_SECRET",
+            "\"${customizationValue("GOOGLE_OAUTH_CLIENT_SECRET").ifEmpty { "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" }}\""
         )
 
         ndk {

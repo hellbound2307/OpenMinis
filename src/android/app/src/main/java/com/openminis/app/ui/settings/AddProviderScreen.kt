@@ -211,7 +211,7 @@ private fun availableCredentials(type: ProviderType): List<ProviderCredential> {
         ProviderType.openRouter -> listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
         ProviderType.anthropic,
         ProviderType.openAI -> listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
-        ProviderType.gemini -> listOf(ProviderCredential.apiKey)
+        ProviderType.gemini -> listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
         // xAI Grok primarily targets SuperGrok / X Premium+ OAuth, but also
         // offers a plain API key path (api.x.ai). Mirror OpenAI's pattern
         // of exposing both so users on tiers without OAuth API access can
@@ -582,6 +582,41 @@ private fun ColumnScope.ApiKeyConfigSection(
                     singleLine = true,
                 )
             }
+            // [T-android-zai-preset] One-tap endpoint presets for OpenAI- /
+            // Anthropic-compatible aggregators. Tapping fills the base URL and
+            // turns OFF the /v1 suffix: z.ai's paths are complete as given and
+            // appending /v1 would 404 (/api/paas/v4/v1/…). After saving, add a
+            // GLM model manually (e.g. glm-4.6, glm-4.5-air).
+            val endpointPresets = when (providerType) {
+                ProviderType.openAI -> listOf(
+                    "z.ai · GLM (OpenAI-compat)" to "https://api.z.ai/api/paas/v4",
+                )
+                ProviderType.anthropic -> listOf(
+                    "z.ai · GLM (Claude-compat)" to "https://api.z.ai/api/anthropic",
+                )
+                else -> emptyList()
+            }
+            if (endpointPresets.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    endpointPresets.forEach { (label, url) ->
+                        Box(
+                            modifier = Modifier
+                                .background(
+                                    MaterialTheme.colorScheme.surfaceVariant,
+                                    RoundedCornerShape(50),
+                                )
+                                .clickable {
+                                    onCustomBaseURLChange(url)
+                                    appendV1Suffix = false
+                                }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                        ) {
+                            Text(label, style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                }
+            }
             // Auto Append "/v1" toggle (not for Gemini — Gemini uses full path)
             if (providerType != ProviderType.gemini) {
                 SettingsSwitchRow(
@@ -795,6 +830,16 @@ private fun ColumnScope.OAuthConfigSection(
                                     }
                                     ProviderType.anthropic -> {
                                         val key = com.openminis.app.auth.ClaudeOAuthManager.login(context, pendingInstanceId, providerRepository)
+                                        maskedToken = maskOAuthToken(key)
+                                    }
+                                    ProviderType.gemini -> {
+                                        // [T-android-gemini-oauth] Google sign-in
+                                        // → Code Assist tokens; on request time
+                                        // GeminiProvider routes through
+                                        // cloudcode-pa.googleapis.com so a Gemini
+                                        // Pro / AI Pro subscription works without
+                                        // an API key.
+                                        val key = com.openminis.app.auth.GeminiOAuthManager.login(context, pendingInstanceId, providerRepository)
                                         maskedToken = maskOAuthToken(key)
                                     }
                                     ProviderType.openAI -> {

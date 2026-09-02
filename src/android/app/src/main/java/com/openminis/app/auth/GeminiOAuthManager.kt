@@ -1,10 +1,15 @@
 package com.openminis.app.auth
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.util.Log
+import androidx.browser.customtabs.CustomTabsIntent
+import com.openminis.app.BuildConfig
+import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -13,6 +18,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlin.coroutines.resume
 
 class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(context, instanceId) {
     companion object {
@@ -42,11 +48,17 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
 
     override val authURL = "https://accounts.google.com/o/oauth2/v2/auth"
     override val tokenURL = "https://oauth2.googleapis.com/token"
-    override val clientId = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-    // Placeholder. Google OAuth requires a client secret alongside the
-    // client id; supply your own from Google Cloud Console to use this
-    // sign-in. API-key providers are unaffected.
-    override val clientSecret = "GOCSPX-xxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+    /**
+     * Google OAuth client. Defaults to the Gemini CLI's public installed-app
+     * client (the same one iOS ships), overridable at build time via
+     * provider-customization.properties → GOOGLE_OAUTH_CLIENT_ID/SECRET for
+     * a dedicated GCP client. Installed-app clients are not confidential:
+     * the secret ships in the binary by design, exactly like Gemini CLI.
+     */
+    override val clientId: String = BuildConfig.GOOGLE_OAUTH_CLIENT_ID
+    override val clientSecret: String? =
+        BuildConfig.GOOGLE_OAUTH_CLIENT_SECRET.ifEmpty { null }
     override val callbackPort = 8085
     override val redirectPath = "/oauth2callback"
     override val scopes = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
@@ -54,6 +66,7 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
     override fun buildAuthorizationUrl(): String {
         val (_, challenge) = generateHexPKCE()
         val state = generateState()
+        lastLoginState = state
         return "$authURL?" + listOf(
             "client_id=$clientId",
             "redirect_uri=${Uri.encode(redirectUri)}",
@@ -65,6 +78,80 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
             "access_type=offline",
             "prompt=consent",
         ).joinToString("&")
+    }
+
+    /** State issued by the most recent [buildAuthorizationUrl] call. */
+    @Volatile
+    private var lastLoginState: String? = null
+
+    private var loginCallbackServer: OAuthCallbackServer? = null
+
+    /**
+     * Static helper mirroring [ClaudeOAuthManager.login] /
+     * [OpenAIOAuthManager.login] — full sign-in flow, token persisted through
+     * [ProviderRepository.saveApiKey], access token returned.
+     */
+    suspend fun login(
+        context: Context,
+        instanceId: String,
+        providerRepository: com.openminis.app.data.repository.ProviderRepository,
+    ): String {
+        val manager = GeminiOAuthManager(context, instanceId)
+        val token = manager.performLogin(context)
+        providerRepository.saveApiKey(instanceId, token)
+        return token
+    }
+
+    /**
+     * Perform the full OAuth login flow: loopback callback server on
+     * [callbackPort], browser sign-in, code exchange. Returns the access
+     * token. Throws on failure.
+     *
+     * Uses a Custom Tab (not a cold ACTION_VIEW) like the other managers:
+     * MainActivity is singleTask, and a new-task browser makes the IME
+     * dismiss whenever the Google page focuses an input.
+     */
+    suspend fun performLogin(context: Context): String {
+        AppLogger.info(TAG, "=== Gemini OAuth login started (instance=$instanceId) ===")
+
+        loginCallbackServer?.stop()
+        loginCallbackServer = null
+
+        val authUrl = buildAuthorizationUrl()
+        val redacted = authUrl.replace(Regex("code_challenge=[^&]+"), "code_challenge=<redacted>")
+        AppLogger.info(TAG, "authorize URL: $redacted")
+
+        val accessToken = withContext(Dispatchers.IO) {
+            val (code, state) = suspendCancellableCoroutine<Pair<String, String?>> { cont ->
+                val server = OAuthCallbackServer(callbackPort) { receivedCode, receivedState ->
+                    if (cont.isActive) cont.resume(receivedCode to receivedState)
+                }
+                loginCallbackServer = server
+                server.start()
+                cont.invokeOnCancellation {
+                    server.stop()
+                    loginCallbackServer = null
+                }
+                val customTabsIntent = CustomTabsIntent.Builder().setShowTitle(true).build()
+                customTabsIntent.launchUrl(context, Uri.parse(authUrl))
+            }
+            loginCallbackServer?.stop()
+            loginCallbackServer = null
+
+            if (state != null && lastLoginState != null && state != lastLoginState) {
+                AppLogger.warning(TAG, "state mismatch during Gemini OAuth — proceeding (mirrors OpenAI path)")
+            }
+
+            // Base-class exchange: form-urlencoded grant with client_secret +
+            // PKCE verifier — the shape Google's token endpoint requires.
+            val ok = exchangeCode(code)
+            if (!ok) throw Exception("Google sign-in failed at the token exchange step. Check the network and try again.")
+            loadStoredTokens()?.optString("access_token", "")?.takeIf { it.isNotEmpty() }
+                ?: throw Exception("Google sign-in returned no access token.")
+        }
+
+        AppLogger.info(TAG, "=== Gemini OAuth login complete (instance=$instanceId tokenLen=${accessToken.length}) ===")
+        return accessToken
     }
 
     var email: String?

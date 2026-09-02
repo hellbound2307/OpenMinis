@@ -29,6 +29,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import com.openminis.app.provider.failOnSilentEmptyCompletion
 import com.openminis.app.provider.thinking.ThinkingRuleResolver
@@ -37,8 +38,57 @@ class GeminiProvider(
     private val apiKey: String,
     override var model: LLMModel = LLMModel.gemini25Flash,
     private val basePath: String = "https://generativelanguage.googleapis.com/v1beta",
+    // [T-android-gemini-oauth] Google (Code Assist) OAuth path. When both
+    // providers are set, requests route through cloudcode-pa.googleapis.com
+    // inside the Code Assist envelope — the same wire format Gemini CLI uses
+    // — so a Gemini Pro / Google AI Pro subscription works without an API
+    // key. Null on the plain API-key path.
+    private val oauthTokenProvider: (suspend () -> String?)? = null,
+    private val gcpProjectProvider: (suspend () -> String?)? = null,
 ) : LLMProvider {
     override val name = "Google"
+
+    /** Cloud Code Assist base — method calls use Google's `:method` suffix. */
+    private val cloudCodeBase = "https://cloudcode-pa.googleapis.com/v1internal"
+
+    /** Stable per-provider session id, as Gemini CLI sends for Cloud Code. */
+    private val sessionId = UUID.randomUUID().toString()
+
+    /** Identity-locked UA the Cloud Code endpoint expects (mirrors iOS). */
+    private fun geminiCliUserAgent(): String = "GeminiCLI/0.30.0/${model.id} (darwin; arm64)"
+
+    /** Client metadata Gemini CLI sends alongside Cloud Code requests. */
+    private val cloudCodeClientMetadata =
+        """{"ideType":"GEMINI_CLI","platform":"DARWIN_ARM64","pluginType":"GEMINI"}"""
+
+    /** Short random hex prompt id, Gemini CLI format (`a1b2c3d4e5f67`). */
+    private fun generatePromptId(): String =
+        UUID.randomUUID().toString().replace("-", "").take(13)
+
+    /**
+     * Resolve the Cloud Code context (access token, GCP project id) on the
+     * OAuth path; null on the API-key path. The project provider triggers
+     * Code Assist discovery/onboarding on first use (cached afterwards).
+     */
+    private suspend fun cloudCodeContext(): Pair<String, String>? {
+        val tokenProvider = oauthTokenProvider ?: return null
+        val projectProvider = gcpProjectProvider ?: return null
+        val project = projectProvider() ?: throw LLMError.InvalidApiKey()
+        val token = tokenProvider() ?: throw LLMError.InvalidApiKey()
+        return token to project
+    }
+
+    /**
+     * Wrap the standard Gemini request body in the Cloud Code Assist
+     * envelope (Gemini CLI wire format): the inner request carries a session
+     * id, and model + project live OUTSIDE it.
+     */
+    private fun wrapCloudCodeBody(body: JSONObject, project: String): JSONObject =
+        JSONObject()
+            .put("model", model.id)
+            .put("project", project)
+            .put("user_prompt_id", generatePromptId())
+            .put("request", body.put("session_id", sessionId))
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -59,14 +109,26 @@ class GeminiProvider(
         thinkingLevel: ThinkingLevel,
     ): LLMResponse = withContext(Dispatchers.IO) {
         val body = buildRequestBody(messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel)
-        val url = "$basePath/models/${model.id}:generateContent?key=$apiKey"
-        val request = Request.Builder()
+        // [T-android-gemini-oauth] OAuth → Cloud Code Assist (`:generateContent`,
+        // envelope + Bearer); API key → generativelanguage (`?key=`).
+        val cloud = cloudCodeContext()
+        val url: String
+        val payload: JSONObject
+        val builder = Request.Builder()
+        if (cloud != null) {
+            url = "$cloudCodeBase:generateContent"
+            payload = wrapCloudCodeBody(body, cloud.second)
+            builder.header("Authorization", "Bearer ${cloud.first}")
+                .header("User-Agent", geminiCliUserAgent())
+                .header("Client-Metadata", cloudCodeClientMetadata)
+        } else {
+            url = "$basePath/models/${model.id}:generateContent?key=$apiKey"
+            payload = body
+            builder.applyUserAgentOverride(null)
+        }
+        val request = builder
             .url(url)
-            .post(body.toString().toRequestBody("application/json".toMediaType()))
-            // [T-android-default-ua] Brand the outbound UA so server logs
-            // can trace the request back to the Minis build. Gemini has no
-            // SDK-specific UA requirement, so the helper's default kicks in.
-            .applyUserAgentOverride(null)
+            .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
         val response = client.newCall(request).execute()
@@ -77,10 +139,12 @@ class GeminiProvider(
         }
 
         val json = JSONObject(responseBody)
-        val text = extractText(json)
-        val finishReason = extractFinishReason(json)
-        val usage = extractUsage(json)
-        val mediaAttachments = extractInlineMedia(json)
+        // Cloud Code wraps the standard response: {"response": {...}}.
+        val inner = json.optJSONObject("response") ?: json
+        val text = extractText(inner)
+        val finishReason = extractFinishReason(inner)
+        val usage = extractUsage(inner)
+        val mediaAttachments = extractInlineMedia(inner)
         LLMResponse(text, finishReason ?: "end_turn", usage, mediaAttachments)
     }
 
@@ -106,13 +170,24 @@ class GeminiProvider(
         thinkingLevel: ThinkingLevel,
     ): Flow<LLMStreamChunk> = callbackFlow {
         val body = buildRequestBody(messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel)
-        val url = "$basePath/models/${model.id}:streamGenerateContent?alt=sse&key=$apiKey"
-        val request = Request.Builder()
+        val cloud = cloudCodeContext()
+        val url: String
+        val payload: JSONObject
+        val builder = Request.Builder()
+        if (cloud != null) {
+            url = "$cloudCodeBase:streamGenerateContent?alt=sse"
+            payload = wrapCloudCodeBody(body, cloud.second)
+            builder.header("Authorization", "Bearer ${cloud.first}")
+                .header("User-Agent", geminiCliUserAgent())
+                .header("Client-Metadata", cloudCodeClientMetadata)
+        } else {
+            url = "$basePath/models/${model.id}:streamGenerateContent?alt=sse&key=$apiKey"
+            payload = body
+            builder.applyUserAgentOverride(null)
+        }
+        val request = builder
             .url(url)
-            .post(body.toString().toRequestBody("application/json".toMediaType()))
-            // [T-android-default-ua] same intent as the non-streaming
-            // branch above — brand outbound requests with Minis/<version>.
-            .applyUserAgentOverride(null)
+            .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
         val response = client.newCall(request).execute()
@@ -130,9 +205,12 @@ class GeminiProvider(
             while (reader.readLine().also { line = it } != null) {
                 val l = line ?: continue
                 if (!l.startsWith("data: ")) continue
-                val payload = l.removePrefix("data: ")
+                val payloadLine = l.removePrefix("data: ")
 
-                val json = try { JSONObject(payload) } catch (_: Exception) { continue }
+                val json = try { JSONObject(payloadLine) } catch (_: Exception) { continue }
+                // Cloud Code SSE chunks are wrapped: {"response": {...}} —
+                // unwrap so the extractors see the standard shape.
+                val inner = json.optJSONObject("response") ?: json
 
                 if (!started) {
                     send(LLMStreamChunk.Started)
@@ -140,7 +218,7 @@ class GeminiProvider(
                 }
 
                 // Separate thought parts from text parts
-                val (text, thinking) = extractTextAndThinking(json)
+                val (text, thinking) = extractTextAndThinking(inner)
                 if (thinking.isNotEmpty()) {
                     send(LLMStreamChunk.ThinkingDelta(thinking))
                 }
@@ -149,7 +227,7 @@ class GeminiProvider(
                 }
 
                 // Extract function calls from streaming response
-                val functionCalls = extractFunctionCalls(json)
+                val functionCalls = extractFunctionCalls(inner)
                 for ((fcName, fcArgs, fcSig) in functionCalls) {
                     val toolId = "gemini_${System.nanoTime()}"
                     send(LLMStreamChunk.ToolUseStart(toolId, fcName))
@@ -159,11 +237,11 @@ class GeminiProvider(
                     send(LLMStreamChunk.ToolCallComplete(toolId, fcName, fcArgs, thoughtSignature = fcSig))
                 }
 
-                extractUsage(json)?.let { usage ->
+                extractUsage(inner)?.let { usage ->
                     send(LLMStreamChunk.Usage(usage))
                 }
 
-                extractFinishReason(json)?.let { reason ->
+                extractFinishReason(inner)?.let { reason ->
                     lastFinishReason = reason
                 }
             }

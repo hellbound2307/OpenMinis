@@ -886,6 +886,13 @@ private fun OAuthCredentialBlock(
                                 com.openminis.app.auth.ClaudeOAuthManager.login(
                                     context, instance.id, providerRepository,
                                 )
+                            // [T-android-gemini-oauth] Re-run Google sign-in on
+                            // an existing Gemini instance (token revoked, wrong
+                            // account, or switching from API key to OAuth).
+                            ProviderType.gemini ->
+                                com.openminis.app.auth.GeminiOAuthManager.login(
+                                    context, instance.id, providerRepository,
+                                )
                             ProviderType.openAI ->
                                 com.openminis.app.auth.OpenAIOAuthManager.login(
                                     context, instance.id, providerRepository,

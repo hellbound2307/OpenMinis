@@ -192,6 +192,11 @@ class RcloneRemoteStore(private val context: Context) {
      * Runs per launch, off the main thread. rclone is told to use a config path
      * under cacheDir so it never writes credentials to a file we would then
      * have to protect — the encrypted store stays the only copy.
+     *
+     * Telegram destinations are SKIPPED: they are not rclone backends (the
+     * embedded rclone has no Telegram support compiled in), they are driven by
+     * [TelegramClient] directly. Pushing one here would make config/create
+     * fail-log "didn't find backend called telegram" on every launch.
      */
     fun syncToRclone() {
         val configPath = File(context.cacheDir, "rclone-ephemeral.conf").absolutePath
@@ -203,7 +208,8 @@ class RcloneRemoteStore(private val context: Context) {
         // not quietly lower the bar for every other destination the user has.
         RcloneBridge.setInsecureTLS(remotes.any { it.allowInsecureTLS })
 
-        for (r in remotes) {
+        val rcloneBackends = remotes.filter { it.backend != "telegram" }
+        for (r in rcloneBackends) {
             val params = buildConfigParams(
                 backend = r.backend,
                 params = r.params,
@@ -226,7 +232,7 @@ class RcloneRemoteStore(private val context: Context) {
                 AppLogger.error(TAG, "[Rclone] config/create failed for '${r.name}': ${it.message}")
             }
         }
-        AppLogger.info(TAG, "[Rclone] synced ${remotes.size} remote(s) into rclone config")
+        AppLogger.info(TAG, "[Rclone] synced ${rcloneBackends.size} remote(s) into rclone config")
     }
 
     /** `core/obscure`, or null when the RPC is unavailable/fails. */
@@ -248,6 +254,9 @@ class RcloneRemoteStore(private val context: Context) {
          */
         fun secretKeyFor(backend: String): String = when (backend) {
             "s3" -> "secret_access_key"
+            // Telegram's bot token rides the same encrypted secret store as
+            // rclone passwords; TelegramClient reads it back under this key.
+            "telegram" -> "bot_token"
             else -> "pass"
         }
 

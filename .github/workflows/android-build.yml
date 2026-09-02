@@ -1,0 +1,80 @@
+name: Android Build
+
+# Builds the Minis Android APK, including the native PRoot sandbox and the
+# Alpine rootfs assets. Produces debug + release (debug-signed) artifacts.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout (with native submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK + CMake
+        run: |
+          sdkmanager --install "ndk;28.0.12433566" "cmake;3.22.1" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.0.12433566" >> "$GITHUB_ENV"
+
+      - name: Build-time customization (defaults)
+        # The public mirror ships only the .example template; CI builds with
+        # empty customization values (API-key sign-in and Gemini OAuth work;
+        # only Claude-OAuth system-prompt identification needs a real value).
+        working-directory: src/android
+        run: |
+          if [ ! -f app/provider-customization.properties ]; then
+            cp app/provider-customization.properties.example app/provider-customization.properties
+          fi
+
+      - name: Build native sandbox dependencies
+        # Cross-compiles the OpenMinis PRoot fork with the NDK and installs
+        # it into app assets + jniLibs (libproot.so + verified loaders).
+        run: |
+          chmod +x deps/build_proot.sh
+          ./deps/build_proot.sh
+
+      - name: Prepare Alpine rootfs asset
+        run: |
+          chmod +x scripts/prepare_android_sandbox.sh
+          ./scripts/prepare_android_sandbox.sh
+
+      - name: Gradle wrapper permissions
+        working-directory: src/android
+        run: chmod +x gradlew
+
+      - name: Build APKs (debug + release)
+        working-directory: src/android
+        run: ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx6g :app:assembleDebug :app:assembleRelease
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: minis-debug-apk
+          path: src/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: minis-release-apk
+          path: src/android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

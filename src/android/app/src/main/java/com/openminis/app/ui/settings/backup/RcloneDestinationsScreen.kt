@@ -86,6 +86,13 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
             AddServerForm(
                 vm = vm,
                 onCancel = { adding = false },
+                // [T-android-telegram-destination] Telegram connects AND saves
+                // in one step (no folder to pick), so the form needs the same
+                // saved-confirmation handback the FolderBrowser already has.
+                onSaved = { name ->
+                    adding = false
+                    justSaved = name
+                },
             )
             return@SettingsScaffold
         }
@@ -258,16 +265,40 @@ internal fun AddServerForm(
             )
         }
 
-        Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
-            value = startPath,
-            onValueChange = { startPath = it },
-            label = { Text(stringResource(R.string.backup_dest_start_path)) },
-            placeholder = { Text(stringResource(R.string.backup_dest_start_path_hint)) },
-            singleLine = true,
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        // [T-android-telegram-destination] Telegram has no destination folder
+        // to choose — packages are tracked in one pinned index message — so
+        // the start-path field is meaningless noise for it and is hidden.
+        // The setup steps are shown instead: the two BotFather facts the form
+        // asks for are NOT self-explanatory to someone who has never made a
+        // bot, and a wrong chat id otherwise surfaces only as a failed
+        // backup far away from the field that caused it.
+        val isTelegram = backend.type == "telegram"
+
+        if (isTelegram) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Setup: message @BotFather → /newbot → paste its token here. Then send any " +
+                    "message to your new bot and paste your chat ID (get it from @userinfobot). " +
+                    "Packages are stored as files in that chat — encrypted before upload when a " +
+                    "passphrase is set, so only you can read them.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            )
+        }
+
+        if (!isTelegram) {
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = startPath,
+                onValueChange = { startPath = it },
+                label = { Text(stringResource(R.string.backup_dest_start_path)) },
+                placeholder = { Text(stringResource(R.string.backup_dest_start_path_hint)) },
+                singleLine = true,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
 
         // [T-android-rclone-tls-timeout] Shown ONLY after the server has been
         // refused on certificate grounds. A permanently visible "don't verify
@@ -301,8 +332,18 @@ internal fun AddServerForm(
                     // connection IS the confirmation, so persist it here and
                     // return. Nothing is saved when the connection fails —
                     // this runs only on success.
-                    onConnected = if (pickFolder) null else {
-                        { vm.saveConnected(onSaved) }
+                    // [T-android-telegram-destination] Telegram saves inside
+                    // connectAndBrowse (there is no folder step), so BOTH
+                    // hosts hand straight back to onSaved; saveConnected
+                    // would double-add a destination the VM already stored.
+                    onConnected = when {
+                        backend.type == "telegram" -> {
+                            { onSaved(displayName.trim()) }
+                        }
+                        pickFolder -> null
+                        else -> {
+                            { vm.saveConnected(onSaved) }
+                        }
                     },
                 )
             },

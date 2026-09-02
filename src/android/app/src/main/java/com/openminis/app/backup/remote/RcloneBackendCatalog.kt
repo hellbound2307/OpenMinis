@@ -56,6 +56,20 @@ object RcloneBackendCatalog {
 
     /** Ordered by how likely someone backing up a phone is to want it. */
     val all: List<Backend> = listOf(
+        // Telegram is NOT an rclone backend — it is driven by TelegramClient
+        // (Bot API) directly — but it lives in this catalog so the add-server
+        // form, the saved-destination list and the restore flow all treat it
+        // like any other destination. See the backend-skip in
+        // RcloneRemoteStore.syncToRclone.
+        Backend(
+            type = "telegram",
+            title = "Telegram",
+            subtitle = "Your own bot's chat — free off-device storage that survives a lost phone",
+            fields = listOf(
+                Field("bot_token", "Bot Token", "123456789:AA…", isSecret = true),
+                Field("chat_id", "Chat ID", "123456789 or @channelname"),
+            ),
+        ),
         Backend(
             type = "smb",
             title = "SMB / Windows Share",

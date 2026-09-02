@@ -7,6 +7,7 @@ import com.openminis.app.backup.remote.RcloneBackendCatalog
 import com.openminis.app.backup.remote.RcloneBridge
 import com.openminis.app.backup.remote.RcloneBrowser
 import com.openminis.app.backup.remote.RcloneRemoteStore
+import com.openminis.app.backup.remote.TelegramClient
 import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -87,6 +88,41 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
         _busy.value = true
         _error.value = null
         viewModelScope.launch {
+            // ── Telegram: verify + save, no rclone, no folder browsing ──
+            // Telegram has no directory tree to pick a destination folder in
+            // (packages are indexed in one pinned message), so the connect
+            // step IS the whole flow: verify the token + chat, save, hand
+            // back. onConnected fires for BOTH hosts; for the backup
+            // destination host the screen closes the form, for the restore
+            // host it returns the saved name.
+            if (backend == "telegram") {
+                try {
+                    val token = values[RcloneRemoteStore.secretKeyFor(backend)]?.trim().orEmpty()
+                    val chatId = values["chat_id"]?.trim().orEmpty()
+                    if (token.isEmpty() || chatId.isEmpty()) {
+                        throw IllegalArgumentException("Bot token and chat ID are both required.")
+                    }
+                    withContext(Dispatchers.IO) {
+                        TelegramClient(getApplication()).verify(token, chatId)
+                        store.add(
+                            name = displayName,
+                            backend = "telegram",
+                            params = mapOf("chat_id" to chatId),
+                            secret = token,
+                            path = "",
+                        )
+                    }
+                    refresh()
+                } catch (e: Exception) {
+                    AppLogger.error(TAG, "[Telegram] connect failed: ${e.message}")
+                    _error.value = e.message ?: "Could not connect to Telegram."
+                } finally {
+                    _busy.value = false
+                }
+                if (_error.value == null) onConnected?.invoke()
+                return@launch
+            }
+
             var connected = false
             try {
                 val candidate = withContext(Dispatchers.IO) {
@@ -94,7 +130,7 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
                         RcloneBackendCatalog.backend(backend)?.fields
                             ?.firstOrNull { it.key == key }?.isSecret != true
                     }
-                    val secretKeyName = if (backend == "s3") "secret_access_key" else "pass"
+                    val secretKeyName = RcloneRemoteStore.secretKeyFor(backend)
                     val secret = values[secretKeyName]
                     // The candidate's certificate choice has to be live for THIS
                     // connection test, not just persisted at save time —
@@ -193,7 +229,7 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    val secretKeyName = if (b.remote.backend == "s3") "secret_access_key" else "pass"
+                    val secretKeyName = RcloneRemoteStore.secretKeyFor(b.remote.backend)
                     // The secret was passed to registerEphemeral; re-read it from
                     // the live rclone config is not possible, so we require the
                     // caller to have kept it — instead we persist non-secret
