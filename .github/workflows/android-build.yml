@@ -32,7 +32,7 @@ jobs:
 
       - name: Install NDK + CMake
         run: |
-          sdkmanager --install "ndk;28.0.12433566" "cmake;3.22.1" > /dev/null
+          sdkmanager --install "ndk;28.0.12433566" "cmake;3.22.1" "platforms;android-24" > /dev/null
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.0.12433566" >> "$GITHUB_ENV"
 
       - name: Build-time customization (defaults)
@@ -51,6 +51,24 @@ jobs:
         run: |
           chmod +x deps/build_proot.sh
           ./deps/build_proot.sh
+
+      - name: Set up Go (for rclone AAR)
+        # rclone.aar is a build artifact (like libproot.so): produced from the
+        # vendored deps/rclone-mobile gomobile binding via
+        # deps/build_rclone_android.sh (arm64-v8a only, matching abiFilters).
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build rclone AAR (gomobile)
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          gomobile init
+          chmod +x deps/build_rclone_android.sh
+          ./deps/build_rclone_android.sh
+          mkdir -p src/android/app/libs
+          cp deps/build/rclone/rclone.aar src/android/app/libs/rclone.aar
 
       - name: Prepare Alpine rootfs asset
         run: |
