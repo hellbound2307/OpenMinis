@@ -93,6 +93,12 @@ abstract class OAuthManager(
                 // the dispatch: logout, manual-bearer reads and token
                 // refreshes route here like every other provider.
                 com.openminis.app.data.model.ProviderType.gemini -> GeminiOAuthManager(context, instance.id)
+                // [T-android-antigravity] Google Antigravity sign-in (port 8086
+                // callback, Cloud Code project discovery, community fallback
+                // project). Fully wired: sign-in UI + AntigravityProvider
+                // request path.
+                com.openminis.app.data.model.ProviderType.antigravity ->
+                    AntigravityOAuthManager(context, instance.id)
                 else -> null
             }
         }

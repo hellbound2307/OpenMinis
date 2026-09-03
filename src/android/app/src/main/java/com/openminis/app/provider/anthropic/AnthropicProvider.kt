@@ -286,8 +286,14 @@ class AnthropicProvider(
      *   Returns null when the prompt is null/empty (iOS parity — no empty `system` field).
      */
     internal fun resolveSystemPrompt(userPrompt: String?): JSONArray? {
-        val claudeCodePrefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
+        // [T-android-zai-glm-oauth] Read the identifier LAZILY, inside the OAuth
+        // branch only. It is a BuildConfig field that throws when unconfigured —
+        // reading it unconditionally crashed EVERY Anthropic-protocol request,
+        // including z.ai GLM instances the factory deliberately builds with
+        // isOAuth=false (their credential is a plain coding-plan API key that
+        // never needs the Claude Code prefix).
         if (isOAuth) {
+            val claudeCodePrefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
             // Strip the prefix if the caller already prepended it; the tail is the real user prompt.
             val tail = when {
                 userPrompt == null -> ""

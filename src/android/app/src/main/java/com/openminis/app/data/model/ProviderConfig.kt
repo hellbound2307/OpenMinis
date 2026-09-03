@@ -65,8 +65,11 @@ enum class ProviderType(val displayName: String) {
         get() = when (this) {
             // openAIResponses included: it routes through the OpenAI provider
             // with the Responses endpoint forced on.
-            anthropic, gemini, openAI, openRouter, xAI, kimiCode, openAIResponses -> true
-            antigravity, unsupported -> false
+            // [T-android-antigravity] antigravity is now fully driven on
+            // Android (AntigravityProvider + AntigravityOAuthManager port of
+            // the iOS implementation).
+            anthropic, gemini, openAI, openRouter, xAI, kimiCode, openAIResponses, antigravity -> true
+            unsupported -> false
         }
 
     val builtInModels: List<LLMModel>

@@ -93,6 +93,30 @@ object AntigravityModelsApi {
         enriched
     }
 
+    /**
+     * Curated stand-in catalog used when the live
+     * `v1internal:fetchAvailableModels` call fails entirely, so a freshly
+     * signed-in instance is never model-less. Ids mirror the catalog the
+     * opencode-antigravity-auth tooling observes on this surface; the live
+     * fetch (or a manual Refresh) replaces them with authoritative entries.
+     */
+    fun fallbackModels(): List<LLMModel> = listOf(
+        "gemini-3-pro-high",
+        "gemini-3-pro-low",
+        "gemini-3-flash",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "claude-sonnet-4-5",
+        "claude-opus-4-6-thinking",
+        "gpt-oss-120b-medium",
+    ).map { id ->
+        LLMModel(
+            id = id,
+            displayName = id,
+            provider = "Antigravity",
+        )
+    }
+
     private fun parseModels(json: JSONObject): List<LLMModel> {
         val modelsField = json.opt("models") ?: return emptyList()
         val out = mutableListOf<LLMModel>()

@@ -39,8 +39,8 @@ android {
         applicationId = "com.openminis.app.x"
         minSdk = 26
         targetSdk = 35
-        versionCode = 26
-        versionName = "1.14-x1"
+        versionCode = 27
+        versionName = "1.15-x1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -66,6 +66,22 @@ android {
             "String",
             "GOOGLE_OAUTH_CLIENT_SECRET",
             "\"${customizationValue("GOOGLE_OAUTH_CLIENT_SECRET").ifEmpty { "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" }}\""
+        )
+
+        // Google Antigravity OAuth client — the Cloud Code surface that
+        // replaced the retired "Gemini Code Assist for individuals" OAuth.
+        // Defaults to the Antigravity IDE's installed-app client (the same
+        // client the iOS build and the community tooling use); both values
+        // are overridable via provider-customization.properties.
+        buildConfigField(
+            "String",
+            "ANTIGRAVITY_OAUTH_CLIENT_ID",
+            "\"${customizationValue("ANTIGRAVITY_OAUTH_CLIENT_ID").ifEmpty { "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com" }}\""
+        )
+        buildConfigField(
+            "String",
+            "ANTIGRAVITY_OAUTH_CLIENT_SECRET",
+            "\"${customizationValue("ANTIGRAVITY_OAUTH_CLIENT_SECRET").ifEmpty { "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" }}\""
         )
 
         ndk {

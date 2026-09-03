@@ -2219,6 +2219,24 @@ class ProviderRepository(private val context: Context) {
                         customUserAgent = instance.customUserAgent,
                     )
                     ProviderType.gemini -> GeminiModelsApi.fetchModels(apiKey)
+                    // [T-android-antigravity] Live catalog from
+                    // v1internal:fetchAvailableModels on the discovered Cloud
+                    // Code base URL, cached 7 days by AntigravityModelsApi. On
+                    // hard failure it returns empty — fall back to a small
+                    // curated list so a freshly signed-in instance is never
+                    // model-less (the live fetch is the primary source; ids
+                    // mirror the opencode-antigravity-auth catalog).
+                    ProviderType.antigravity -> {
+                        val mgr = com.openminis.app.auth.AntigravityOAuthManager(context, instance.id)
+                        val token = mgr.validAccessToken()
+                        if (token != null) {
+                            val base = mgr.activeBaseURL
+                                ?: com.openminis.app.auth.AntigravityOAuthManager.cloudCodeBaseURLs.first()
+                            com.openminis.app.provider.antigravity.AntigravityModelsApi
+                                .fetchModels(token, base, context)
+                                .ifEmpty { com.openminis.app.provider.antigravity.AntigravityModelsApi.fallbackModels() }
+                        } else emptyList()
+                    }
                     // [T-provider-custom-user-agent] models-list UA override.
                     // [T-android-provider-type-parity] openAIResponses lists
                     // models from the same /v1/models endpoint — only the

@@ -243,13 +243,44 @@ object ProviderFactory {
                     )
                 }
             }
-            // [T-android-provider-type-parity] Types this build can decode and
-            // display but not drive. Reaching here means the user selected a
-            // model on an instance restored from another platform (or a newer
-            // build) whose provider Android cannot speak. Fail with a clear
-            // credential error rather than constructing a provider that would
-            // emit malformed requests. iOS throws FactoryError here likewise.
-            ProviderType.antigravity, ProviderType.unsupported -> {
+            // [T-android-antigravity] Google Antigravity (Cloud Code Assist) —
+            // the OAuth-only surface that replaced the shut-down "Gemini Code
+            // Assist for individuals". Port of iOS makeAntigravityProvider:
+            // Bearer token from AntigravityOAuthManager, project resolved (or
+            // fallen back) at request time, base URL pinned by discovery.
+            ProviderType.antigravity -> {
+                val ctx = context ?: throw com.openminis.app.data.model.LLMError.InvalidApiKey()
+                if (instance.credentialType != ProviderCredential.oauth) {
+                    throw com.openminis.app.data.model.LLMError.InvalidApiKey()
+                }
+                val oauthManager = com.openminis.app.auth.AntigravityOAuthManager(ctx, instance.id)
+                com.openminis.app.provider.antigravity.AntigravityProvider(
+                    oauthTokenProvider = {
+                        // Manual bearer tokens are honoured inside
+                        // validAccessToken (base-class precedence).
+                        oauthManager.validAccessToken()
+                            ?: throw com.openminis.app.data.model.LLMError.InvalidApiKey()
+                    },
+                    gcpProjectProvider = {
+                        // discoverProjectIfNeeded ends in the community fallback
+                        // project, so this only throws when even the token is gone.
+                        if (oauthManager.discoverProjectIfNeeded()) {
+                            oauthManager.gcpProjectId
+                        } else {
+                            throw com.openminis.app.data.model.LLMError.ProviderError(
+                                "Google sign-in succeeded, but no Antigravity project " +
+                                    "could be provisioned for this account. Try signing in again.",
+                            )
+                        }
+                    },
+                    baseURLProvider = {
+                        oauthManager.activeBaseURL
+                            ?: com.openminis.app.auth.AntigravityOAuthManager.cloudCodeBaseURLs.first()
+                    },
+                    model = model,
+                )
+            }
+            ProviderType.unsupported -> {
                 throw com.openminis.app.data.model.LLMError.InvalidApiKey()
             }
         }

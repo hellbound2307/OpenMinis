@@ -905,6 +905,13 @@ private fun OAuthCredentialBlock(
                                 com.openminis.app.auth.GeminiOAuthManager.login(
                                     context, instance.id, providerRepository,
                                 )
+                            // [T-android-antigravity] Re-run Antigravity sign-in
+                            // (the working successor to the retired Gemini Code
+                            // Assist individuals OAuth).
+                            ProviderType.antigravity ->
+                                com.openminis.app.auth.AntigravityOAuthManager.login(
+                                    context, instance.id, providerRepository,
+                                )
                             ProviderType.openAI ->
                                 com.openminis.app.auth.OpenAIOAuthManager.login(
                                     context, instance.id, providerRepository,

@@ -21,3 +21,12 @@ ANTHROPIC_OAUTH_IDENTIFIER_PROMPT=
 # you want to route sign-ins through your own GCP OAuth client.
 GOOGLE_OAUTH_CLIENT_ID=
 GOOGLE_OAUTH_CLIENT_SECRET=
+
+# Google Antigravity OAuth client (the Cloud Code surface that replaced the
+# retired "Gemini Code Assist for individuals" OAuth). Empty means the
+# Antigravity IDE's installed-app client is used (same as the iOS build and
+# the community tooling; the installed-app secret is not a confidential
+# value — the Antigravity IDE ships it in its own binary). Set both values
+# only if you want to route sign-ins through your own GCP OAuth client.
+ANTIGRAVITY_OAUTH_CLIENT_ID=
+ANTIGRAVITY_OAUTH_CLIENT_SECRET=

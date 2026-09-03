@@ -178,11 +178,12 @@ fun AddProviderScreen(
     }
 }
 
-/** Display order matching iOS. */
+/** Display order matching iOS (plus Android's Antigravity port). */
 private val providerDisplayOrder = listOf(
     ProviderType.openAI,
     ProviderType.anthropic,
     ProviderType.gemini,
+    ProviderType.antigravity,
     ProviderType.xAI,
     ProviderType.kimiCode,
     ProviderType.openRouter,
@@ -201,7 +202,9 @@ private fun providerIcon(type: ProviderType): Pair<ImageVector, Color> = when (t
     // package / newer build; never offered in addableProviderTypes, but the
     // icon helper is also used to render an already-restored instance.
     ProviderType.openAIResponses -> Icons.Default.Hub to Color(0xFF4CAF50)
-    ProviderType.antigravity,
+    // [T-android-antigravity] Google's agentic platform — blue-grey rocket
+    // cue (Google's own Antigravity branding leans dark blue).
+    ProviderType.antigravity -> Icons.Default.RocketLaunch to Color(0xFF3B6FD4)
     ProviderType.unsupported -> Icons.Default.Cloud to Color(0xFF9E9E9E)
 }
 
@@ -236,7 +239,9 @@ private fun availableCredentials(type: ProviderType): List<ProviderCredential> {
         ProviderType.openAIResponses -> listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
         // Undrivable types: an API key is the only thing worth showing, and the
         // screen never offers them for creation anyway.
-        ProviderType.antigravity,
+        // [T-android-antigravity] Antigravity is OAuth-only (Google sign-in;
+        // there is no API-key mode on this surface).
+        ProviderType.antigravity -> listOf(ProviderCredential.oauth)
         ProviderType.unsupported -> listOf(ProviderCredential.apiKey)
     }
 }
@@ -269,8 +274,10 @@ private fun ChooseProviderScreen(
                     // [T-android-provider-type-parity] Fall back to the enum's
                     // own display name for types this screen doesn't curate.
                     ProviderType.openAIResponses,
-                    ProviderType.antigravity,
                     ProviderType.unsupported -> type.displayName
+                    // [T-android-antigravity] Distinguish from the plain
+                    // Gemini (AI Studio / Code Assist) entry.
+                    ProviderType.antigravity -> "Antigravity (Google)"
                 }
                 // Describe which vendors each protocol supports, rather than a
                 // raw built-in model count.
@@ -291,7 +298,14 @@ private fun ChooseProviderScreen(
                 val (icon, iconColor) = providerIcon(type)
                 SettingsRow(
                     title = displayTitle,
-                    subtitle = stringResource(subtitleRes),
+                    // [T-android-antigravity] Raw English override — the shared
+                    // OpenAI subtitle would be actively wrong for this entry.
+                    subtitle = if (type == ProviderType.antigravity) {
+                        "Google's agentic platform — sign in with your Google account. " +
+                            "Replaces the retired Gemini Code Assist sign-in (Gemini 3, Claude, GPT-OSS)."
+                    } else {
+                        stringResource(subtitleRes)
+                    },
                     icon = icon,
                     iconColor = iconColor,
                     onClick = { onSelect(type) },
@@ -386,7 +400,7 @@ private fun apiKeyDescription(type: ProviderType): String = when (type) {
     ProviderType.xAI -> "Use an API key from your xAI Console (api.x.ai)"
     ProviderType.kimiCode -> "Use an API key from your Moonshot account"
     ProviderType.openAIResponses -> "Supports the OpenAI Responses API and compatible endpoints"
-    ProviderType.antigravity,
+    ProviderType.antigravity -> "OAuth only — sign in with your Google account"
     ProviderType.unsupported -> "This provider type is not supported on Android"
 }
 
@@ -398,7 +412,7 @@ private fun oauthDescription(type: ProviderType): String = when (type) {
     ProviderType.openRouter -> "Sign in with OpenRouter"
     ProviderType.kimiCode -> "Sign in with your Kimi account (Coding Plan)"
     ProviderType.openAIResponses -> "Sign in with OpenAI Codex"
-    ProviderType.antigravity,
+    ProviderType.antigravity -> "Sign in with Google Antigravity — the migration path Google recommends for retired Gemini Code Assist sign-ins"
     ProviderType.unsupported -> "This provider type is not supported on Android"
 }
 
@@ -745,7 +759,7 @@ private fun ColumnScope.OAuthConfigSection(
         ProviderType.xAI -> "Sign in with xAI"
         ProviderType.kimiCode -> "Sign in with Kimi Code"
         ProviderType.openAIResponses -> "Sign in with OpenAI"
-        ProviderType.antigravity,
+        ProviderType.antigravity -> "Sign in with Antigravity"
         ProviderType.unsupported -> "Sign in"
     }
 
@@ -870,6 +884,15 @@ private fun ColumnScope.OAuthConfigSection(
                             // Pro / AI Pro subscription works without
                             // an API key.
                             val key = com.openminis.app.auth.GeminiOAuthManager.login(context, pendingInstanceId, providerRepository)
+                            maskedToken = maskOAuthToken(key)
+                        }
+                        ProviderType.antigravity -> {
+                            // [T-android-antigravity] Google Antigravity sign-in
+                            // (port 8086 callback): the working successor to the
+                            // retired Gemini Code Assist individuals OAuth.
+                            // AntigravityProvider routes through the discovered
+                            // Cloud Code base URL with the Antigravity envelope.
+                            val key = com.openminis.app.auth.AntigravityOAuthManager.login(context, pendingInstanceId, providerRepository)
                             maskedToken = maskOAuthToken(key)
                         }
                         ProviderType.openAI -> {
