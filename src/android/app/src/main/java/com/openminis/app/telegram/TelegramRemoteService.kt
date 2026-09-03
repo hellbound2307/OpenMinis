@@ -69,10 +69,12 @@ import java.util.concurrent.atomic.AtomicInteger
  *  fresh start (offset 0 — first run after pairing, or after the queue was
  *  never advanced) the pending queue holds every message ever sent to the
  *  bot, including the pairing message and old tests. Running those as agent
- *  turns would serialize the service for many minutes and look like
- *  "nothing works" — so a fresh offset is drained (advanced past everything
- *  pending, unprocessed). Messages sent while the service is live are always
- *  processed.
+ *  turns would serialize the service for many minutes — but DRAINING them
+ *  wholesale silently ate the user's just-typed test messages too (the
+ *  "bot ignores me" report on a fresh install). The drain is now cutoff-
+ *  aware: updates timestamped BEFORE the "Connect bot" moment (minus a
+ *  60 s grace) are skipped; everything sent AFTER pairing is processed
+ *  normally. Messages sent while the service is live are always processed.
  */
 class TelegramRemoteService : Service() {
 
@@ -184,6 +186,20 @@ class TelegramRemoteService : Service() {
 
     // ── Poll loop ─────────────────────────────────────────────────────────
 
+    /**
+     * The loop NEVER exits on its own while the service lives. Every earlier
+     * terminal condition is now a WAIT instead:
+     *  - disabled    → wait for the toggle (a START_STICKY restart or an app
+     *                  start before the user re-enables used to leave a live
+     *                  foreground service with a DEAD loop — the notification
+     *                  said "active" and the bot ignored everyone forever).
+     *  - unconfigured→ wait for pairing (unchanged, but now also survives
+     *                  transient errors inside the wait itself).
+     * Any exception is caught PER ITERATION — a single failed getUpdates,
+     * a storage hiccup or a drain error can no longer kill the coroutine and
+     * silently strand the service. This loop is the heartbeat; it must be
+     * unkillable for the lifetime of the process.
+     */
     private suspend fun pollLoop() {
         if (!loopActive.compareAndSet(false, true)) return
         AppLogger.info(TAG, "poll loop started")
@@ -195,54 +211,54 @@ class TelegramRemoteService : Service() {
                 delay(1_000)
                 waited += 1_000
             }
-            var announcedUnconfigured = false
             while (scope.isActive) {
-                val cfg = TelegramRemoteStore.load(this)
-                if (!cfg.enabled) break
-                if (!cfg.isConfigured) {
-                    // Nothing to talk to — surface it on the notification (the
-                    // Settings toggle can be flipped before pairing) and wait
-                    // for a config change (the screen restarts the service on
-                    // save).
-                    if (!announcedUnconfigured) {
-                        updateNotification(
-                            "Telegram remote: waiting for setup — pair a bot in Minis settings",
-                        )
-                        announcedUnconfigured = true
-                    }
-                    delay(15_000)
-                    continue
-                }
-                announcedUnconfigured = false
-                // Cold start with a fresh offset: drop the stale queue (see
-                // class doc) instead of replaying days-old messages.
-                if (cfg.updateOffset == 0L) {
-                    val drained = drainPendingUpdates(cfg)
-                    if (drained > 0) {
-                        AppLogger.info(TAG, "drained $drained stale update(s) on cold start")
-                    }
-                }
                 try {
-                    val updates = withContext(Dispatchers.IO) {
-                        TelegramRemoteClient.getUpdates(cfg.botToken, cfg.updateOffset)
+                    val cfg = TelegramRemoteStore.load(this)
+                    when {
+                        !cfg.enabled -> {
+                            // WAIT, don't break. Surface the truth on the
+                            // notification instead of silently dying behind
+                            // an "active" banner (updateNotification dedupes
+                            // same-text re-posts).
+                            updateNotification("Telegram remote disabled — re-enable it in Minis settings")
+                            delay(15_000)
+                        }
+                        !cfg.isConfigured -> {
+                            updateNotification("Telegram remote: waiting for setup — pair a bot in Minis settings")
+                            delay(15_000)
+                        }
+                        else -> {
+                            lastBackoffMs = 1_000L
+                            // Cold start with a fresh offset: skip updates
+                            // that predate pairing (stale /start tests, the
+                            // pairing message itself) but KEEP everything
+                            // sent after "Connect bot" was tapped — that is
+                            // real user input and used to be eaten whole.
+                            if (cfg.updateOffset == 0L) {
+                                val drained = drainStaleUpdates(cfg)
+                                if (drained > 0) {
+                                    AppLogger.info(TAG, "drained $drained stale update(s) predating pairing")
+                                }
+                            }
+                            val updates = withContext(Dispatchers.IO) {
+                                TelegramRemoteClient.getUpdates(cfg.botToken, cfg.updateOffset)
+                            }
+                            lastPollAtMs = System.currentTimeMillis()
+                            lastPollError = null
+                            if (!turnBusy) updateNotification("Telegram remote active")
+                            for (u in updates) {
+                                if (!scope.isActive) break
+                                val updateId = u.optLong("update_id", 0L)
+                                TelegramRemoteStore.saveOffset(this, updateId + 1)
+                                val message = u.optJSONObject("message") ?: continue
+                                dispatch(cfg, message)
+                            }
+                        }
                     }
-                    lastBackoffMs = 1_000L
-                    lastPollAtMs = System.currentTimeMillis()
-                    lastPollError = null
-                    if (!turnBusy) updateNotification("Telegram remote active")
-                    for (u in updates) {
-                        if (!scope.isActive) break
-                        val updateId = u.optLong("update_id", 0L)
-                        TelegramRemoteStore.saveOffset(this, updateId + 1)
-                        val message = u.optJSONObject("message") ?: continue
-                        dispatch(cfg, message)
-                    }
-                } catch (e: TelegramRemoteClient.RemoteException) {
-                    handlePollError(e, cfg)
-                    delay(lastBackoffMs)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (e: Exception) {
-                    lastPollError = e.message ?: e::class.java.simpleName
-                    AppLogger.warning(TAG, "poll error: ${e.message}")
+                    handlePollError(e, TelegramRemoteStore.load(this))
                     delay(lastBackoffMs)
                 }
             }
@@ -252,10 +268,21 @@ class TelegramRemoteService : Service() {
     }
 
     /**
-     * Advance the update offset past everything pending WITHOUT processing.
-     * Used once per cold start when the offset is still 0.
+     * Advance the update offset past updates that PREDATE pairing, WITHOUT
+     * processing them, and stop at the first update newer than the cutoff so
+     * everything the user sent after "Connect bot" survives for the normal
+     * loop. The old behavior drained EVERYTHING pending on a fresh offset —
+     * the user's just-typed test messages included — which read exactly like
+     * "the bot ignores me" on a fresh install.
+     *
+     * Cutoff = pairing moment minus a 60 s grace window (messages sent while
+     * the Connect round was still verifying the token are treated as stale —
+     * the user was still setting up, not yet talking to the agent).
+     * When no pairing timestamp exists (token saved without a Connect round),
+     * fall back to draining everything: there is no cutoff to protect.
      */
-    private suspend fun drainPendingUpdates(cfg: TelegramRemoteStore.Config): Int {
+    private suspend fun drainStaleUpdates(cfg: TelegramRemoteStore.Config): Int {
+        val cutoffMs = if (cfg.pairedAtMs > 0L) cfg.pairedAtMs - 60_000L else Long.MAX_VALUE
         var drained = 0
         var offset = 0L
         // getUpdates returns at most 100 updates per call; loop until empty,
@@ -267,10 +294,19 @@ class TelegramRemoteService : Service() {
             if (updates.isEmpty()) break
             for (u in updates) {
                 val id = u.optLong("update_id", 0L)
-                if (id >= offset) offset = id + 1
+                val msgDateMs = (u.optJSONObject("message")?.optLong("date", 0L) ?: 0L) * 1000L
+                if (msgDateMs >= 1L && msgDateMs < cutoffMs) {
+                    // Stale: pre-pairing traffic. Confirm past it.
+                    if (id >= offset) offset = id + 1
+                    drained++
+                } else {
+                    // Fresh (or undatable) update: STOP here. Do not advance
+                    // the offset past it — the main loop owns it.
+                    if (offset > 0L) TelegramRemoteStore.saveOffset(this, offset)
+                    return drained
+                }
             }
-            drained += updates.size
-            TelegramRemoteStore.saveOffset(this, offset)
+            if (offset > 0L) TelegramRemoteStore.saveOffset(this, offset)
             delay(200)
         }
         return drained

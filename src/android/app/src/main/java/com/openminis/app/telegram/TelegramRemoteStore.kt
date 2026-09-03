@@ -30,6 +30,7 @@ object TelegramRemoteStore {
     private const val KEY_SESSION_ID = "session_id"
     private const val KEY_OFFSET = "update_offset"
     private const val KEY_TOKEN = "bot_token"
+    private const val KEY_PAIRED_AT = "paired_at_ms"
 
     fun load(context: Context): Config {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -43,6 +44,7 @@ object TelegramRemoteStore {
             sessionId = prefs.getString(KEY_SESSION_ID, null).orEmpty(),
             updateOffset = prefs.getLong(KEY_OFFSET, 0L),
             botToken = token,
+            pairedAtMs = prefs.getLong(KEY_PAIRED_AT, 0L),
         )
     }
 
@@ -54,6 +56,18 @@ object TelegramRemoteStore {
     fun saveChatId(context: Context, chatId: String) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit().putString(KEY_CHAT_ID, chatId).apply()
+    }
+
+    /**
+     * Wall-clock moment the user tapped "Connect bot". The service's
+     * cold-start drain uses it as the cutoff: updates older than pairing are
+     * stale test/pairing traffic and get skipped; anything sent AFTER pairing
+     * is real user input and must NEVER be silently dropped. See
+     * [TelegramRemoteService.drainStaleUpdates].
+     */
+    fun savePairedAt(context: Context, atMs: Long) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putLong(KEY_PAIRED_AT, atMs).apply()
     }
 
     fun chatId(context: Context): String =
@@ -94,6 +108,7 @@ object TelegramRemoteStore {
         val sessionId: String,
         val updateOffset: Long,
         val botToken: String,
+        val pairedAtMs: Long = 0L,
     ) {
         val isConfigured: Boolean get() = botToken.isNotBlank() && chatId.isNotBlank()
     }

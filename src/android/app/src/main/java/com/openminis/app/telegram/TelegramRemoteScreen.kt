@@ -145,6 +145,12 @@ fun TelegramRemoteScreen(onBack: () -> Unit) {
                                 runCatching {
                                     val t = TelegramRemoteClient.normalizeBotToken(token.trim())
                                     TelegramRemoteStore.saveBotToken(context, t)
+                                    // Stamp the pairing moment BEFORE detection:
+                                    // the service's cold-start drain treats
+                                    // updates older than this as stale (the
+                                    // pairing ping itself, old /start tests) and
+                                    // everything newer as real input to run.
+                                    TelegramRemoteStore.savePairedAt(context, System.currentTimeMillis())
                                     // The service's own long-poll holds the bot's
                                     // update stream — a concurrent getUpdates here
                                     // 409s ("Conflict: terminated by other
@@ -166,7 +172,13 @@ fun TelegramRemoteScreen(onBack: () -> Unit) {
                                             "Connected. Paired with chat ${detected.first} (${detected.second})."
                                         }
                                     } finally {
-                                        if (serviceWasUp) TelegramRemoteService.start(context)
+                                        // Restart whenever the user wants the
+                                        // service on — not only when it happened
+                                        // to be up before (a loop that died while
+                                        // unconfigured stays dead otherwise).
+                                        if (TelegramRemoteStore.load(context).enabled) {
+                                            TelegramRemoteService.start(context)
+                                        }
                                     }
                                 }
                             }
