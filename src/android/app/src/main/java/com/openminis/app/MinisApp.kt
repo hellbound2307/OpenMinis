@@ -645,6 +645,18 @@ class MinisApp : Application(), ImageLoaderFactory {
             configConfirmNotifier.cancel(it)
         }
 
+        // [T-android-telegram-remote] Restart the remote-agent service if the
+        // user had it enabled. The service itself guards on subsystemsReady
+        // and no-ops when not configured. runCatching: FGS background-start
+        // restrictions can reject this when the process was started by a
+        // broadcast rather than the UI — the boot receiver + Settings toggle
+        // are the other two entry points.
+        runCatching {
+            if (com.openminis.app.telegram.TelegramRemoteStore.load(this).enabled) {
+                com.openminis.app.telegram.TelegramRemoteService.start(this)
+            }
+        }
+
         // Track foreground state via ActivityLifecycleCallbacks. Counting
         // started/stopped balances out around configuration changes (the
         // Activity is briefly destroyed-then-created, so the count would

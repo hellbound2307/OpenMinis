@@ -9177,6 +9177,15 @@ class ChatViewModel(
             "browser_use" -> executeBrowserUseTool(argsJson)
             "memory_write" -> executeMemoryWriteTool(argsJson)
             "memory_get" -> executeMemoryGetTool(argsJson)
+            // [T-android-subagent-tool] Context-isolated child agent runs.
+            // Spawn is blocking (wait=true) by default so the parent turn can
+            // consume the result inline; agent_status polls background runs.
+            "spawn_agent" -> com.openminis.app.tools.subagent.SubagentRunner.executeSpawn(
+                appContext = context,
+                parentSessionId = activeSessionId,
+                argsJson = argsJson,
+            )
+            "agent_status" -> com.openminis.app.tools.subagent.SubagentRunner.executeStatus(argsJson)
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
     }

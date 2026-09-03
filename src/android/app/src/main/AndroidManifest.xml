@@ -460,6 +460,21 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
 
+        <!-- Telegram Remote foreground service (fork): long-polls the Bot API
+             and runs agent turns on inbound messages. mediaPlayback type for
+             the same dataSync-cap escape as AgentForegroundService. -->
+        <service
+            android:name=".telegram.TelegramRemoteService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+        <receiver
+            android:name=".telegram.TelegramRemoteBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
         <!-- Alarm broadcast receiver (also handles BOOT_COMPLETED for re-scheduling) -->
         <receiver
             android:name=".offload.AlarmReceiver"

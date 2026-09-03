@@ -40,6 +40,7 @@ import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.automirrored.outlined.Send
+import androidx.compose.material.icons.outlined.Send
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Terminal
@@ -78,6 +79,7 @@ fun SettingsScreen(
     onModelGroupsClick: () -> Unit,
     onRootfsClick: () -> Unit = {},
     onBackupClick: () -> Unit = {},
+    onTelegramRemoteClick: () -> Unit = {},
     onEnvVarsClick: () -> Unit = {},
     onSkillsClick: () -> Unit = {},
     onTerminalClick: () -> Unit = {},
@@ -246,6 +248,18 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_backup_restore),
                     subtitle = stringResource(R.string.settings_backup_restore_subtitle),
                     onClick = onBackupClick,
+                    showDivider = false,
+                )
+            }
+
+            // -- Connectivity (fork) --
+            SettingsSection(title = "Connectivity") {
+                SettingsItem(
+                    icon = Icons.Outlined.Send,
+                    iconColor = Color(0xFF30B0C7),
+                    title = "Telegram Remote",
+                    subtitle = "Control Minis from Telegram from any device",
+                    onClick = onTelegramRemoteClick,
                     showDivider = false,
                 )
             }

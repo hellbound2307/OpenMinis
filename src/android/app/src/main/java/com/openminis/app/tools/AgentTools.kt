@@ -40,6 +40,10 @@ object AgentTools {
             add(memoryWriteDefinition())
             add(memoryGetDefinition())
         }
+        // [T-android-subagent-tool] Always expose spawn_agent + agent_status.
+        // Depth / concurrency limits are enforced at runtime by SubagentRunner.
+        add(spawnAgentDefinition())
+        add(agentStatusDefinition())
     }
 
     // Aligned with iOS AIChatViewModel.swift:4982-4993
@@ -135,5 +139,46 @@ object AgentTools {
         ),
         required = listOf("tool_title"),
         propertyOrdering = listOf("tool_title", "scope", "keywords"),
+    )
+
+    // [T-android-subagent-tool] spawn_agent: context-isolated child agent.
+    // The child runs in its own session with a fresh context window, sharing
+    // the same providers and tools (except spawn_agent itself). The parent
+    // receives the final text; the child session appears in the session list.
+    private fun spawnAgentDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = "spawn_agent",
+        description = "Spawn a context-isolated child agent to work on a subtask. " +
+            "The child has its own fresh context window, the same provider access, " +
+            "and most of the same tools (except spawn_agent itself — subagents cannot " +
+            "spawn further subagents for now). " +
+            "Use this for self-contained subtasks: deep research, long file analysis, " +
+            "drafting, fact-checking, parallel work. " +
+            "The child's session appears in the session list for inspection. " +
+            "When wait=true (default), the tool blocks until the child finishes and " +
+            "returns the final text. When wait=false, the tool returns a run_id " +
+            "immediately; poll with agent_status to check progress.",
+        parameters = mapOf(
+            "tool_title" to AgentToolParam("string", "A concise 5-10 word summary of what this tool call does, shown to the user (e.g. 'Research X topic', 'Draft Y document'). Use the same language as the user."),
+            "task" to AgentToolParam("string", "The instruction for the subagent. Treated as a user message in the child session. Be specific about what to do and what to return."),
+            "label" to AgentToolParam("string", "Optional short label for the child session, visible in the session list. Defaults to the first words of task."),
+            "wait" to AgentToolParam("boolean", "When true (default), block until the child finishes and return the result. When false, return a run_id immediately and let the child run in the background."),
+            "timeout_sec" to AgentToolParam("integer", "Maximum seconds to wait for the child (default 600, max 1800). Ignored when wait=false."),
+        ),
+        required = listOf("tool_title", "task"),
+        propertyOrdering = listOf("tool_title", "task", "label", "wait", "timeout_sec"),
+    )
+
+    // [T-android-subagent-tool] agent_status: query subagent runs.
+    private fun agentStatusDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = "agent_status",
+        description = "Query the status of a subagent run. When run_id is provided, " +
+            "returns the status and result of that specific run. Without run_id, " +
+            "lists all active and recent subagent runs.",
+        parameters = mapOf(
+            "tool_title" to AgentToolParam("string", "A concise 5-10 word summary."),
+            "run_id" to AgentToolParam("string", "Optional: the run id returned by spawn_agent. Omit to list all runs."),
+        ),
+        required = listOf("tool_title"),
+        propertyOrdering = listOf("tool_title", "run_id"),
     )
 }

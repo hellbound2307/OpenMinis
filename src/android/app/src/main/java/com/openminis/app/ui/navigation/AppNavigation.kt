@@ -110,6 +110,7 @@ object Routes {
     const val ADD_CUSTOM_MODEL = "add_custom_model/{instanceId}"
     const val STORAGE = "storage"
     const val BACKUP = "backup"
+    const val TELEGRAM_REMOTE = "telegram_remote"
     const val BACKUP_DESTINATIONS = "backup_destinations"
     const val BACKUP_HISTORY_DETAIL = "backup_history_detail"
     const val BACKUP_DESTINATION_BROWSE = "backup_destination_browse"
@@ -587,6 +588,7 @@ fun AppNavigation(
                 onModelGroupsClick = { navController.safeNavigate(Routes.MODEL_GROUPS) },
                 onRootfsClick = { navController.safeNavigate(Routes.STORAGE) },
                 onBackupClick = { navController.safeNavigate(Routes.BACKUP) },
+                onTelegramRemoteClick = { navController.safeNavigate(Routes.TELEGRAM_REMOTE) },
                 onEnvVarsClick = { navController.safeNavigate(Routes.ENV_VARS) },
                 onSkillsClick = { navController.safeNavigate(Routes.SKILLS) },
                 onTerminalClick = { navController.safeNavigate(Routes.terminal()) },
@@ -617,6 +619,12 @@ fun AppNavigation(
                         "${Routes.RESTORE_BROWSE}/" + android.net.Uri.encode(name),
                     )
                 },
+            )
+        }
+
+        composable(Routes.TELEGRAM_REMOTE) {
+            com.openminis.app.telegram.TelegramRemoteScreen(
+                onBack = { navController.safePopBackStack() },
             )
         }
 

@@ -246,6 +246,17 @@ internal object HeadlessChatRunner {
         )
     }
 
+    /**
+     * Cancel any in-flight stream on [sessionId]. Used by the Telegram remote
+     * (/stop) and subagent cancellation — callers that don't own a UI button.
+     * Safe to call when nothing is streaming (cancelStream is a no-op then).
+     */
+    fun stop(context: Context, sessionId: String) {
+        runCatching {
+            viewModel(context, sessionId).cancelStream()
+        }
+    }
+
     suspend fun retry(
         context: Context,
         sessionId: String,
