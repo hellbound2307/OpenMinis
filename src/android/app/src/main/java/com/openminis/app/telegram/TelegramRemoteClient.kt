@@ -181,6 +181,7 @@ internal object TelegramRemoteClient {
         return client.newCall(req).execute().use { resp ->
             val bodyText = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
+                if (resp.code == 429) retryAfterOrThrow(bodyText, resp.code)
                 val desc = parseError(bodyText) ?: "HTTP ${resp.code}"
                 throw RemoteException(desc, canRetry = resp.code == 429 || resp.code >= 500)
             }
@@ -196,11 +197,30 @@ internal object TelegramRemoteClient {
         return client.newCall(req).execute().use { resp ->
             val bodyText = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
+                if (resp.code == 429) retryAfterOrThrow(bodyText, resp.code)
                 val desc = parseError(bodyText) ?: "HTTP ${resp.code}"
                 throw RemoteException(desc, canRetry = resp.code == 429 || resp.code >= 500)
             }
             parseJson(bodyText)
         }
+    }
+
+    /**
+     * Honor Telegram's flood-control `retry_after` once (bounded to 60 s),
+     * then rethrow so the caller's own backoff takes over. Mirrors the backup
+     * client's behavior — without this, a busy chat turns into a retry storm
+     * against a 429.
+     */
+    private fun retryAfterOrThrow(bodyText: String, code: Int) {
+        val retryAfter = runCatching {
+            JSONObject(bodyText).optJSONObject("parameters")?.optInt("retry_after")
+        }.getOrNull()
+        if (retryAfter != null && retryAfter in 1..60) {
+            Thread.sleep((retryAfter + 1) * 1000L)
+            return
+        }
+        val desc = parseError(bodyText) ?: "HTTP $code"
+        throw RemoteException(desc, canRetry = true)
     }
 
     private fun parseJson(text: String): JSONObject {

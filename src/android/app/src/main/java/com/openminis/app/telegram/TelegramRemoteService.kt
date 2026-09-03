@@ -20,6 +20,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -29,6 +30,8 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * [T-android-telegram-remote] The remote-agent service.
@@ -55,12 +58,21 @@ import java.util.UUID
  *  ignored entirely.
  *
  * ## Turn semantics
- *  A single agent turn runs at a time (serialized by a mutex). Inbound text
- *  (and photos/documents, downloaded into the session's workspace) is sent
- *  as a user turn into a dedicated, persistent session — so the remote agent
- *  has conversation continuity across messages. `/new` starts a fresh
- *  session, `/stop` cancels the in-flight turn, `/status` reports what is
- *  running. Reply text is chunked to Telegram's 4096-char limit.
+ *  The poll loop NEVER blocks on agent work: control commands (/new /stop
+ *  /status) are answered inline so they stay live while a turn runs, and
+ *  agent messages are fed through [inbound] to a single worker that runs
+ *  turns one at a time under [turnMutex]. Messages sent while a turn runs
+ *  queue (in order) instead of being lost.
+ *
+ * ## Cold-start drain
+ *  Bot API keeps updates for 24h and the service persists its offset. On a
+ *  fresh start (offset 0 — first run after pairing, or after the queue was
+ *  never advanced) the pending queue holds every message ever sent to the
+ *  bot, including the pairing message and old tests. Running those as agent
+ *  turns would serialize the service for many minutes and look like
+ *  "nothing works" — so a fresh offset is drained (advanced past everything
+ *  pending, unprocessed). Messages sent while the service is live are always
+ *  processed.
  */
 class TelegramRemoteService : Service() {
 
@@ -96,7 +108,20 @@ class TelegramRemoteService : Service() {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** Serializes agent turns; control commands bypass it entirely. */
     private val turnMutex = Mutex()
+
+    /** Guard so only one poll loop runs even after rapid START_STICKY restarts. */
+    private val loopActive = AtomicBoolean(false)
+
+    /** Agent messages waiting for the worker (control commands never queue). */
+    private val inbound =
+        Channel<Pair<TelegramRemoteStore.Config, JSONObject>>(Channel.UNLIMITED)
+    private val queueDepth = AtomicInteger(0)
+
+    @Volatile
+    private var turnBusy = false
 
     private var app: MinisApp? = null
     private var lastBackoffMs = 1_000L
@@ -107,6 +132,11 @@ class TelegramRemoteService : Service() {
         app = applicationContext as? MinisApp
         createChannel()
         startForeground(NOTIF_ID, buildNotification("Telegram remote active"))
+        lastNotifText = "Telegram remote active"
+        // The worker owns agent turns; the poll loop only fetches updates,
+        // answers control commands inline and feeds the channel — so /stop
+        // and /status stay live even while a long turn runs.
+        scope.launch { turnWorker() }
         if (app?.subsystemsReady() == true) {
             scope.launch { pollLoop() }
         } else {
@@ -116,14 +146,13 @@ class TelegramRemoteService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Restart loop if it died (e.g. START_STICKY restart, or subsystems
-        // came up after our onCreate early-return).
-        if (app?.subsystemsReady() == true && !isLoopActive) {
+        // came up after our onCreate early-return). pollLoop guards itself
+        // with a compareAndSet, so rapid restarts cannot double-launch it.
+        if (app?.subsystemsReady() == true) {
             scope.launch { pollLoop() }
         }
         return START_STICKY
     }
-
-    private var isLoopActive = false
 
     override fun onDestroy() {
         isRunning = false
@@ -133,32 +162,51 @@ class TelegramRemoteService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    // ── Poll loop ─────────────────────────────────────────────────────────
+
     private suspend fun pollLoop() {
-        if (isLoopActive) return
-        isLoopActive = true
-        val mApp = app ?: run { isLoopActive = false; return }
+        if (!loopActive.compareAndSet(false, true)) return
         AppLogger.info(TAG, "poll loop started")
         try {
+            var announcedUnconfigured = false
             while (scope.isActive) {
-                if (!TelegramRemoteStore.load(this).enabled) break
                 val cfg = TelegramRemoteStore.load(this)
+                if (!cfg.enabled) break
                 if (!cfg.isConfigured) {
-                    // Nothing to talk to — back off and wait for a config change
-                    // (Settings screen restarts the service on save).
+                    // Nothing to talk to — surface it on the notification (the
+                    // Settings toggle can be flipped before pairing) and wait
+                    // for a config change (the screen restarts the service on
+                    // save).
+                    if (!announcedUnconfigured) {
+                        updateNotification(
+                            "Telegram remote: waiting for setup — pair a bot in Minis settings",
+                        )
+                        announcedUnconfigured = true
+                    }
                     delay(15_000)
                     continue
+                }
+                announcedUnconfigured = false
+                // Cold start with a fresh offset: drop the stale queue (see
+                // class doc) instead of replaying days-old messages.
+                if (cfg.updateOffset == 0L) {
+                    val drained = drainPendingUpdates(cfg)
+                    if (drained > 0) {
+                        AppLogger.info(TAG, "drained $drained stale update(s) on cold start")
+                    }
                 }
                 try {
                     val updates = withContext(Dispatchers.IO) {
                         TelegramRemoteClient.getUpdates(cfg.botToken, cfg.updateOffset)
                     }
                     lastBackoffMs = 1_000L
+                    if (!turnBusy) updateNotification("Telegram remote active")
                     for (u in updates) {
                         if (!scope.isActive) break
                         val updateId = u.optLong("update_id", 0L)
                         TelegramRemoteStore.saveOffset(this, updateId + 1)
                         val message = u.optJSONObject("message") ?: continue
-                        handleInbound(cfg, message)
+                        dispatch(cfg, message)
                     }
                 } catch (e: TelegramRemoteClient.RemoteException) {
                     handlePollError(e, cfg)
@@ -169,8 +217,33 @@ class TelegramRemoteService : Service() {
                 }
             }
         } finally {
-            isLoopActive = false
+            loopActive.set(false)
         }
+    }
+
+    /**
+     * Advance the update offset past everything pending WITHOUT processing.
+     * Used once per cold start when the offset is still 0.
+     */
+    private suspend fun drainPendingUpdates(cfg: TelegramRemoteStore.Config): Int {
+        var drained = 0
+        var offset = 0L
+        // getUpdates returns at most 100 updates per call; loop until empty,
+        // with a hard round cap so a pathological queue can't spin forever.
+        for (round in 0 until 50) {
+            val updates = withContext(Dispatchers.IO) {
+                TelegramRemoteClient.getUpdates(cfg.botToken, offset, timeoutSec = 0)
+            }
+            if (updates.isEmpty()) break
+            for (u in updates) {
+                val id = u.optLong("update_id", 0L)
+                if (id >= offset) offset = id + 1
+            }
+            drained += updates.size
+            TelegramRemoteStore.saveOffset(this, offset)
+            delay(200)
+        }
+        return drained
     }
 
     private suspend fun handlePollError(e: Exception, cfg: TelegramRemoteStore.Config) {
@@ -183,15 +256,22 @@ class TelegramRemoteService : Service() {
         }
     }
 
-    private suspend fun handleInbound(cfg: TelegramRemoteStore.Config, message: JSONObject) {
-        val chat = message.optJSONObject("chat")
-        val chatId = chat?.optString("id", null) ?: return
+    // ── Inbound routing ───────────────────────────────────────────────────
+
+    /**
+     * Route one inbound message. Control commands are answered HERE, inline
+     * in the poll loop, so they work while a turn is running — the previous
+     * design funneled everything through the turn mutex, which made /stop
+     * unreachable exactly when it was needed. Agent messages go to [inbound].
+     */
+    private suspend fun dispatch(cfg: TelegramRemoteStore.Config, message: JSONObject) {
+        val chat = message.optJSONObject("chat") ?: return
+        val chatId = chat.optString("id", null) ?: return
         if (chatId != TelegramRemoteStore.chatId(this)) {
-            // Unauthorized sender — ignore completely (also avoids noisy logs).
+            // Unauthorized sender — ignore (no reply, no turn).
             AppLogger.info(TAG, "ignoring message from unauthorized chat $chatId")
             return
         }
-        val msgId = message.optInt("message_id", 0)
         val text = message.optString("text", null).takeIf { it != null }
 
         // Local control commands never consume an agent turn.
@@ -203,19 +283,59 @@ class TelegramRemoteService : Service() {
                 return
             }
             "/stop" -> {
-                HeadlessChatRunner.stop(this, TelegramRemoteStore.sessionId(this))
-                TelegramRemoteClient.sendText(cfg.botToken, chatId, "Stopped.")
+                val dropped = dropQueued()
+                val sid = TelegramRemoteStore.sessionId(this)
+                if (sid.isNotEmpty()) HeadlessChatRunner.stop(this, sid)
+                TelegramRemoteClient.sendText(
+                    cfg.botToken, chatId,
+                    if (dropped > 0) {
+                        "Stopped — current turn cancelled, $dropped queued message(s) dropped."
+                    } else {
+                        "Stopped."
+                    },
+                )
                 return
             }
             "/status" -> {
-                val running = turnBusy
-                TelegramRemoteClient.sendText(cfg.botToken, chatId,
-                    if (running) "Busy — a turn is running." else "Idle. Send me anything.")
+                val queued = queueDepth.get()
+                val state = when {
+                    turnBusy && queued > 0 -> "Busy — a turn is running, $queued message(s) queued."
+                    turnBusy -> "Busy — a turn is running."
+                    queued > 0 -> "Idle — $queued message(s) queued."
+                    else -> "Idle. Send me anything."
+                }
+                TelegramRemoteClient.sendText(cfg.botToken, chatId, state)
                 return
             }
         }
 
-        // Serialize agent turns: while one runs, later messages queue.
+        queueDepth.incrementAndGet()
+        inbound.trySend(cfg to message)
+    }
+
+    /** Drop every queued (not yet started) agent message. */
+    private fun dropQueued(): Int {
+        var dropped = 0
+        while (inbound.tryReceive().isSuccess) {
+            queueDepth.decrementAndGet()
+            dropped++
+        }
+        return dropped
+    }
+
+    /** Consumes [inbound] and runs agent turns strictly one at a time. */
+    private suspend fun turnWorker() {
+        for ((cfg, message) in inbound) {
+            if (!scope.isActive) break
+            queueDepth.decrementAndGet()
+            runTurn(cfg, message)
+        }
+    }
+
+    private suspend fun runTurn(cfg: TelegramRemoteStore.Config, message: JSONObject) {
+        val chatId = message.optJSONObject("chat")?.optString("id") ?: return
+        val msgId = message.optInt("message_id", 0)
+        val text = message.optString("text", null).takeIf { it != null }
         turnMutex.withLock {
             turnBusy = true
             updateNotification("Telegram remote: working…")
@@ -255,7 +375,11 @@ class TelegramRemoteService : Service() {
             } catch (e: Exception) {
                 AppLogger.error(TAG, "agent turn failed: ${e.message}")
                 runCatching {
-                    TelegramRemoteClient.sendText(cfg.botToken, chatId, "⚠️ ${e.message}", msgId)
+                    TelegramRemoteClient.sendText(
+                        cfg.botToken, chatId,
+                        "⚠️ ${e.message ?: e::class.java.simpleName}",
+                        msgId,
+                    )
                 }
             } finally {
                 turnBusy = false
@@ -263,9 +387,6 @@ class TelegramRemoteService : Service() {
             }
         }
     }
-
-    @Volatile
-    private var turnBusy = false
 
     private fun buildPrompt(text: String?): String {
         val t = text?.trim().orEmpty()
@@ -363,7 +484,15 @@ class TelegramRemoteService : Service() {
             .build()
     }
 
+    @Volatile
+    private var lastNotifText: String? = null
+
     private fun updateNotification(text: String) {
+        // Same-text re-posts are skipped: the poll loop and the turn worker
+        // both touch the notification, and re-posting the identical banner
+        // every 25s would keep the notification drawer churning.
+        if (text == lastNotifText) return
+        lastNotifText = text
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(NOTIF_ID, buildNotification(text))
     }

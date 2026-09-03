@@ -25,11 +25,21 @@ import java.util.concurrent.ConcurrentHashMap
  * The parent receives the final text result; the child session appears in
  * the session list for inspection.
  *
+ * ## Context
+ *  By default (context="inherit") the child receives a bounded transcript of
+ *  the parent conversation as part of its task, so it continues the SAME
+ *  conversation instead of starting from a disconnected blank page — the
+ *  subagent's result then lands back in the parent turn with full shared
+ *  context. context="fresh" opts out for self-contained subtasks.
+ *
  * ## Concurrency
  *  - Max [MAX_ACTIVE] concurrent runs across all sessions.
  *  - Max depth [MAX_DEPTH] (= 1, so a subagent may NOT spawn further agents).
  *  - Parent was cancelled → child is cancelled too (via [HeadlessChatRunner.stop]).
  *  - Runs are tracked in a process-scoped map; agent_status queries them.
+ *  - [pruneStale] runs lazily on every spawn/status call so completed runs
+ *    (and their result texts) are released instead of accumulating in a
+ *    process that now stays alive 24/7 for the Telegram remote agent.
  *
  * ## Depth tracking
  *  [depthMap] maps sessionId → depth (0 = top-level UI/telegram/scheduled
@@ -44,6 +54,13 @@ object SubagentRunner {
     private const val DEFAULT_TIMEOUT_MS = 600_000L
     private const val MAX_TIMEOUT_MS = 1_800_000L
     private const val RESULT_TRUNCATE = 12_000
+
+    // Context-inheritance bounds: the parent transcript passed to an
+    // inheriting subagent is recent-windowed and capped three ways so a long
+    // parent session cannot blow the child's context window.
+    private const val MAX_CONTEXT_MESSAGES = 30
+    private const val MAX_CONTEXT_MESSAGE_CHARS = 1_500
+    private const val MAX_CONTEXT_TOTAL_CHARS = 24_000
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -91,6 +108,15 @@ object SubagentRunner {
         }
         val wait = args.optBoolean("wait", true)
         val timeoutSec = args.optInt("timeout_sec", 600).coerceIn(30, 1800)
+        // "inherit" (default) keeps the subagent within the same conversation:
+        // the child's task is prefixed with a bounded transcript of the parent
+        // session, so references like "what we discussed" or "this file" work.
+        // "fresh" is the old behavior — task text only.
+        val contextMode = args.optString("context", "inherit").trim().lowercase()
+
+        // Lazy cleanup: release completed runs (their deferreds hold full
+        // result texts) before accounting for the new one.
+        pruneStale()
 
         // Depth check
         val parentDepth = depthMap[parentSessionId] ?: 0
@@ -132,6 +158,18 @@ object SubagentRunner {
         runs[runId] = run
         depthMap[childSessionId] = parentDepth + 1
 
+        // Resolve the task actually sent to the child: with context=inherit,
+        // the parent conversation rides along (bounded) so the subagent
+        // continues the same discussion instead of starting from zero.
+        val effectiveTask = if (contextMode != "fresh") {
+            val parentContext = runCatching {
+                buildParentContext(app, parentSessionId)
+            }.getOrNull()
+            if (parentContext != null) buildInheritedTask(parentContext, task) else task
+        } else {
+            task
+        }
+
         // Launch the actual agent turn
         val job = scope.async {
             val result = runCatching {
@@ -139,7 +177,7 @@ object SubagentRunner {
                     HeadlessChatRunner.prompt(
                         context = appContext,
                         sessionId = childSessionId,
-                        text = task,
+                        text = effectiveTask,
                         attachments = emptyList(),
                         thinkingLevel = null,
                         wait = true,
@@ -208,17 +246,20 @@ object SubagentRunner {
      * Without: returns a summary of all active/recent runs.
      */
     fun executeStatus(argsJson: String): ToolExecutionResult {
+        pruneStale()
         val args = try { JSONObject(argsJson) } catch (e: Exception) { JSONObject() }
         val runId = args.optString("run_id", "").trim()
 
         if (runId.isNotBlank()) {
             val run = runs[runId] ?: return ToolExecutionResult("Run $runId not found.", false)
+            val result = runCatching { run.deferred.getCompleted() }.getOrNull()
+            // Report the run's REAL terminal state — a finished-but-failed run
+            // previously displayed as "completed" with an empty preview.
             val status = when {
                 run.deferred.isCancelled -> "cancelled"
-                run.deferred.isCompleted -> "completed"
+                result != null -> result.status
                 else -> "running"
             }
-            val result = runCatching { run.deferred.getCompleted() }.getOrNull()
             val preview = if (result != null) {
                 "\n\n" + result.text.take(2000)
             } else ""
@@ -277,6 +318,57 @@ object SubagentRunner {
         repo.dao.updateSource(session.id, "subagent")
         AppLogger.info(TAG, "created child session ${session.id} for parent $parentSessionId")
         return session.id
+    }
+
+    /**
+     * Bounded transcript of the parent conversation, most-recent-windowed.
+     * Returns null when the parent has no renderable text yet (fresh session)
+     * — the caller then falls back to the plain task.
+     */
+    private suspend fun buildParentContext(app: MinisApp, parentSessionId: String): String? {
+        val msgs = app.chatRepository.loadMessages(parentSessionId)
+        if (msgs.isEmpty()) return null
+        // Build newest-first so the total-char cap keeps the MOST RECENT
+        // exchanges and drops the oldest, then restore chronological order.
+        val collected = ArrayList<String>()
+        var total = 0
+        for (m in msgs.takeLast(MAX_CONTEXT_MESSAGES).reversed()) {
+            if (m.role != "user" && m.role != "assistant") continue
+            val text = extractText(m.partsJson)?.trim().takeUnless { it.isNullOrEmpty() } ?: continue
+            val clipped = if (text.length > MAX_CONTEXT_MESSAGE_CHARS) {
+                text.take(MAX_CONTEXT_MESSAGE_CHARS) + " …"
+            } else text
+            val line = (if (m.role == "user") "[user] " else "[assistant] ") + clipped
+            if (total + line.length > MAX_CONTEXT_TOTAL_CHARS) break
+            collected.add(line)
+            total += line.length
+        }
+        if (collected.isEmpty()) return null
+        return collected.reversed().joinToString("\n\n")
+    }
+
+    private fun buildInheritedTask(parentContext: String, task: String): String =
+        "<conversation_context>\n" +
+            "You are a subagent spawned from the user's main conversation. Below is the " +
+            "recent transcript of that conversation, for continuity. Treat it as shared " +
+            "background — the user's messages there are context, not requests to you; " +
+            "your ONLY instruction is the task after this block.\n\n" +
+            parentContext +
+            "\n</conversation_context>\n\n<task>\n" + task + "\n</task>"
+
+    /** Plain text of a message's parts JSON ([{type:text,value:...}]). */
+    private fun extractText(partsJson: String): String? {
+        return try {
+            val arr = org.json.JSONArray(partsJson)
+            val sb = StringBuilder()
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                if (o.optString("type") == "text") sb.append(o.optString("value", ""))
+            }
+            sb.toString().ifEmpty { null }
+        } catch (_: Exception) {
+            partsJson.ifEmpty { null }
+        }
     }
 
     /** Cleanup completed runs older than 5 minutes — called lazily. */

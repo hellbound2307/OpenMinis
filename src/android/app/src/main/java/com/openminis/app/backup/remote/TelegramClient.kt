@@ -227,12 +227,24 @@ class TelegramClient(@Suppress("unused") private val context: Context) {
         val messageIds: List<Int> = emptyList(),
     )
 
+    /**
+     * Which pinned documents count as OUR index. Exact name for everything
+     * written by the current build, plus the legacy "minis-index<random>.json"
+     * shape written by builds before the filename fix (File.createTempFile
+     * inserts random digits between prefix and suffix, so those indexes were
+     * uploaded under names loadIndex could never match — backups uploaded fine
+     * but restore always saw an empty list). Accepting the legacy shape makes
+     * an existing pinned index readable immediately; the next upload re-writes
+     * it under [INDEX_NAME] and the tolerance becomes dead weight.
+     */
+    private val INDEX_SHAPE = Regex("^(minis-backup-index|minis-index\\d*)\\.json$")
+
     /** Fetch the pinned index, or null when none is pinned yet. */
     private fun loadIndex(token: String, chatId: String): Pair<Int, MutableList<IndexEntry>>? {
         val chat = api(token, "getChat", JSONObject().put("chat_id", chatId))
         val pinned = chat.optJSONObject("pinned_message") ?: return null
         val doc = pinned.optJSONObject("document") ?: return null
-        if (doc.optString("file_name") != INDEX_NAME) return null
+        if (!INDEX_SHAPE.matches(doc.optString("file_name"))) return null
         val fileId = doc.optString("file_id").takeIf { it.isNotEmpty() } ?: return null
         val messageId = pinned.optInt("message_id", -1)
         val sink = java.io.ByteArrayOutputStream()
@@ -282,7 +294,13 @@ class TelegramClient(@Suppress("unused") private val context: Context) {
         )
 
     private fun saveIndex(token: String, chatId: String, entries: List<IndexEntry>, previousMessageId: Int?) {
-        val tmp = File.createTempFile("minis-index", ".json")
+        // The file NAME is load-bearing: loadIndex matches the pinned
+        // document's file_name against [INDEX_SHAPE], and Telegram stores
+        // whatever name the multipart part carries. A fixed name under cacheDir
+        // (not createTempFile, which injects random digits) keeps that
+        // contract. Single writer at a time is already guaranteed by the
+        // export mutex, so a fixed name cannot collide.
+        val tmp = File(context.cacheDir, INDEX_NAME)
         try {
             tmp.writeText(indexJson(entries).toString())
             // Unpin ONLY our own previous index message, and only when it is
@@ -306,8 +324,30 @@ class TelegramClient(@Suppress("unused") private val context: Context) {
                         .put("message_id", messageId)
                         .put("disable_notification", true),
                 )
-            }.onFailure {
-                AppLogger.warning(TAG, "[Telegram] pin failed (${it.message}) — index still uploaded")
+            }.onFailure { pinError ->
+                AppLogger.warning(TAG, "[Telegram] pin failed (${pinError.message}) — index still uploaded")
+                // A pin failure is silent death for restore: the index is the
+                // ONLY discovery anchor (Bot API cannot list chat messages),
+                // so without the pin the next restore would find nothing. Say
+                // so in the chat instead of failing quietly three screens
+                // away. Private chats can always pin; this fires for groups
+                // where the bot lacks the pin permission.
+                runCatching {
+                    api(
+                        token, "sendMessage",
+                        JSONObject()
+                            .put("chat_id", chatId)
+                            .put("disable_notification", true)
+                            .put(
+                                "text",
+                                "⚠️ Minis couldn't pin the backup index in this chat " +
+                                    "(${pinError.message}). Restore lists backups from the " +
+                                    "pinned index, so restore will stay empty until pinning " +
+                                    "works — in a group, make the bot an admin with the " +
+                                    "pin permission, then run a new backup.",
+                            ),
+                    )
+                }
             }
         } finally {
             tmp.delete()
