@@ -26,6 +26,11 @@ render.experimental.xml
 # Keystore files
 *.jks
 *.keystore
+# EXCEPT the pinned CI signing store: it is committed ON PURPOSE so every
+# Actions build signs identically and APK updates install in place without
+# wiping app data (Telegram Remote pairing, backup config, sessions).
+# Debug-grade by design (password 'android') — not a distribution secret.
+!src/android/ci-debug.keystore
 
 # Google Services (e.g. APIs or Firebase)
 google-services.json

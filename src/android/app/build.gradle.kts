@@ -114,6 +114,28 @@ android {
         }
     }
 
+    signingConfigs {
+        // [fork-ci-stable-signing] Pin BOTH debug and release to the keystore
+        // committed at the Gradle root (ci-debug.keystore). Why: GitHub Actions
+        // runners are ephemeral — without a pinned store, Gradle generates a
+        // FRESH debug keystore on every CI run, so every built APK had a
+        // different signature and could only be "updated" by uninstalling
+        // first. An uninstall wipes all app data: the Telegram backup config,
+        // the Telegram Remote pairing (token / paired chat / enabled flag /
+        // update offset) and every chat session. That is exactly why the
+        // remote agent kept coming up unconfigured after each new APK. With a
+        // committed keystore every build signs identically, updates install
+        // IN PLACE, and user data survives. This is a debug-grade store by
+        // design (password "android", public in the repo) — it is not a
+        // distribution secret, it is an update-continuity guarantee.
+        getByName("debug") {
+            storeFile = rootProject.file("ci-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
