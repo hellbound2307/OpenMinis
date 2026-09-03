@@ -9,6 +9,7 @@ import com.openminis.app.ui.chat.ChatViewModelStore
 import com.openminis.app.ui.chat.InputAttachment
 import com.openminis.app.ui.chat.addAttachment
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -213,35 +214,69 @@ internal object HeadlessChatRunner {
             )
         }
         for (att in attachments) vm.addAttachment(att)
-        vm.sendMessage(text)
+        // Snapshot BEFORE the prompt lands: the reply is read from rows that
+        // did not exist before this call, so a reused session VM (the remote
+        // agent's is persistent) can never hand back the PREVIOUS turn's
+        // answer as this turn's result.
+        val app0 = app(context)
+        val beforeIds = app0.chatRepository.dao.loadMessages(sessionId).map { it.id }.toHashSet()
+        // Headless-safe send: the pre-send compact dialog can never park the
+        // prompt (a long-lived remote session crosses the compact threshold
+        // eventually — a UI dialog nobody can answer dropped every message
+        // after that, silently).
+        vm.sendMessageHeadless(text)
         if (!wait) return@withContext PromptResult(status = "Running", responseText = null, timedOut = false)
 
-        // Wait for isStreaming to be false (sendMessage flips it true synchronously
-        // before launching its coroutine; if it never flips true the message was
-        // dropped — return immediately as Completed-but-empty).
-        val started = vm.isStreaming.value
+        // Two-phase waiter (mirrors SubagentRunner):
+        //  1. START — wait (bounded) for the stream to claim `isStreaming`
+        //     (or this prompt's own user row to land). The old single flag
+        //     peek concluded "already finished" on any send path that returns
+        //     without claiming, and returned the previous turn's text.
+        //  2. END — wait for `isStreaming` to stay false across a 2 s grace.
+        var started = vm.isStreaming.value
         if (!started) {
-            // Either dropped (e.g. compacting in flight) or completed before we
-            // returned to the suspension point — fall through to drain.
-        }
-        val finished = withTimeoutOrNull(timeoutMs) {
-            // Skip the initial false (if we were called before sendMessage flipped true)
-            if (vm.isStreaming.value) {
-                // Wait for the next false transition.
-                vm.isStreaming.first { !it }
+            val startDeadline = System.currentTimeMillis() + 60_000L
+            while (!started && System.currentTimeMillis() < startDeadline) {
+                withContext(Dispatchers.IO) { delay(250) }
+                started = vm.isStreaming.value ||
+                    app0.chatRepository.dao.loadMessages(sessionId)
+                        .any { it.id !in beforeIds && it.role == "user" }
             }
-            true
-        } ?: false
+        }
+        val finished = if (!started) {
+            false
+        } else {
+            var quietMs = 0L
+            val endDeadline = System.currentTimeMillis() + timeoutMs
+            var done = false
+            while (System.currentTimeMillis() < endDeadline) {
+                withContext(Dispatchers.IO) { delay(250) }
+                if (!vm.isStreaming.value) {
+                    quietMs += 250
+                    if (quietMs >= 2_000) {
+                        done = true
+                        break
+                    }
+                } else {
+                    quietMs = 0L
+                }
+            }
+            done
+        }
 
-        // Best-effort: read the last assistant text from the DB so we don't
-        // depend on the in-memory UI list (which may not have flushed yet).
-        val app = app(context)
-        val msgs = app.chatRepository.dao.loadMessages(sessionId)
-        val lastAssistant = msgs.lastOrNull { it.role == "assistant" }
-        val responseText = lastAssistant?.let { extractText(it.partsJson) }
+        // Read the reply from THIS turn's rows only (never the whole
+        // transcript's last assistant row — that is the previous turn's
+        // answer whenever this turn produced nothing).
+        val msgs = app0.chatRepository.dao.loadMessages(sessionId)
+        val newRows = msgs.filter { it.id !in beforeIds }
+        val taskRowIdx = newRows.indexOfFirst { it.role == "user" }
+        val afterTask = if (taskRowIdx >= 0) newRows.drop(taskRowIdx + 1) else newRows
+        val responseText = afterTask.lastOrNull { it.role == "assistant" }
+            ?.let { extractText(it.partsJson) }
         PromptResult(
             status = if (finished) "Completed" else "Timeout",
-            responseText = responseText,
+            responseText = responseText
+                ?: if (!finished) null else "(turn finished without a text reply)",
             timedOut = !finished,
         )
     }

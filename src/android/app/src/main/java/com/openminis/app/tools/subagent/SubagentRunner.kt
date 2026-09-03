@@ -8,11 +8,13 @@ import com.openminis.app.logging.AppLogger
 import com.openminis.app.tools.ToolExecutionResult
 import com.openminis.app.ui.chat.ChatViewModel
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -54,9 +56,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  * ## Concurrency
  *
  *  - Max [MAX_ACTIVE] concurrent runs across all sessions.
- *  - Max depth [MAX_DEPTH] (= 1): depth is tracked PER PARENT SESSION and
- *    incremented for the duration of each run, so a subagent running in the
- *    same session cannot nest another spawn past the limit.
+ *  - Max depth [MAX_DEPTH] (= 1): depth is a property of the CALLER — a VM
+ *    registered as an active run's vm is itself a subagent, so its own
+ *    spawn_agent calls are refused past the limit; the top-level VM's calls
+ *    are always depth 1. Sibling spawns (second, third agent from the same
+ *    conversation) are CONCURRENT, not nested — they are bounded by
+ *    [MAX_ACTIVE], never by the depth limit.
  *  - Parent cancelled → child VM's stream is cancelled via [SubagentRun.vm].
  *  - Runs are tracked process-scoped; [pruneStale] releases finished runs on
  *    every spawn/status call (this process now stays alive 24/7 for the
@@ -73,8 +78,6 @@ object SubagentRunner {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** sessionId → CURRENT depth of agent nesting (0 = top-level session). */
-    private val depthMap = ConcurrentHashMap<String, Int>()
     private val runs = ConcurrentHashMap<String, SubagentRun>()
 
     data class SubagentRun(
@@ -103,12 +106,14 @@ object SubagentRunner {
      * Spawn a subagent that runs in the caller's own session and return its
      * result. When [wait] is true, blocks until completion (up to
      * [timeoutSec]); when false, returns immediately with the runId — poll
-     * with agent_status.
+     * with agent_status. [callerVm] is the ChatViewModel executing the tool
+     * call — it decides NESTING depth (see below).
      */
     suspend fun executeSpawn(
         appContext: Context,
         parentSessionId: String,
         argsJson: String,
+        callerVm: ChatViewModel? = null,
     ): ToolExecutionResult {
         val app = appContext.applicationContext as? MinisApp
         if (app == null || !app.subsystemsReady()) {
@@ -140,11 +145,22 @@ object SubagentRunner {
             return ToolExecutionResult("Parent session not found; cannot run a subagent in it.", false)
         }
 
-        // Depth check, atomically: increment first, roll back if refused, so a
-        // same-session child can never race its own depth accounting.
-        val newDepth = depthMap.compute(parentSessionId) { _, d -> (d ?: 0) + 1 } ?: 1
+        // Depth is a property of the CALLER, not the session. Subagents run
+        // INSIDE the parent session now, so the old session-keyed counter
+        // treated every SECOND spawn from the same conversation as "recursion
+        // depth 2" and refused it with "recursion limit reached" — the exact
+        // "the second sub agent is broken" report (a wait=false run held its
+        // depth for five minutes, blocking any sibling spawn in that window).
+        // What MAX_DEPTH actually guards is NESTING: a subagent spawning
+        // another subagent. Nesting is determined by WHO calls spawn_agent —
+        // a VM registered as an active run's vm is itself a subagent (its
+        // depth ≥ 1); any other VM is a top-level caller (depth 0). Siblings
+        // are concurrent, not nested — they are bounded by MAX_ACTIVE below.
+        val callerDepth = runs.values
+            .firstOrNull { it.deferred.isActive && it.vm != null && it.vm === callerVm }
+            ?.depth ?: 0
+        val newDepth = callerDepth + 1
         if (newDepth > MAX_DEPTH) {
-            depthMap.compute(parentSessionId) { _, d -> (d ?: 1) - 1 }
             return ToolExecutionResult(
                 "Subagent recursion limit reached. A subagent cannot spawn further subagents.",
                 false,
@@ -153,7 +169,6 @@ object SubagentRunner {
 
         val activeCount = runs.count { it.value.deferred.isActive }
         if (activeCount >= MAX_ACTIVE) {
-            depthMap.compute(parentSessionId) { _, d -> (d ?: 1) - 1 }
             return ToolExecutionResult(
                 "Too many active subagents ($activeCount/$MAX_ACTIVE). Wait for one to finish or cancel it.",
                 false,
@@ -233,6 +248,19 @@ object SubagentRunner {
      * very tool call we are executing — reusing it would enqueue the task and
      * deadlock waiting for a stream that cannot start until the parent's
      * turn ends).
+     *
+     * Completion detection is a two-phase waiter, not a single flag peek:
+     *  1. START — wait (bounded) for the child's stream to actually claim
+     *     `_isStreaming` (or the task row to land). The old code peeked the
+     *     flag once right after send; on any send path that returns without
+     *     claiming (compact pending, dropped send), it concluded the turn had
+     *     ALREADY finished and returned the previous turn's text as this
+     *     subagent's result.
+     *  2. END — wait for `_isStreaming` to stay false across a 2 s grace, so
+     *     a same-tick flicker cannot be read as completion.
+     * The final text is taken from rows NEW since the pre-send snapshot —
+     * never `lastOrNull(assistant)` over the whole transcript, which under
+     * sibling runs (or a stale read) returns ANOTHER turn's answer.
      */
     private suspend fun runSameSessionTurn(
         app: MinisApp,
@@ -268,32 +296,98 @@ object SubagentRunner {
         }
         if (ready == null) {
             return@withContext SubagentResult(
-                text = "no_provider_resolved_in_5s",
+                text = "no_provider_resolved_in_${PROVIDER_WAIT_MS / 1000}s",
                 status = "error",
             )
         }
 
-        vm.sendMessage(task)
-        val finished = withContext(Dispatchers.Default) {
-            withTimeoutOrNull(timeoutSec * 1000L) {
-                if (vm.isStreaming.value) {
-                    vm.isStreaming.first { !it }
-                }
-                true
-            }
-        } ?: false
+        // Snapshot the transcript BEFORE the child's task lands. The child's
+        // turn is then identified by the rows that did not exist before —
+        // immune to interleaved sibling runs and stale reads.
+        val dao = app.chatRepository.dao
+        val beforeIds = dao.loadMessages(run.sessionId).map { it.id }.toHashSet()
 
-        // The child's final answer is the last assistant row of the shared
-        // transcript (the child's turn just completed; the parent's loop is
-        // still parked in this tool call, so nothing newer exists).
-        val msgs = app.chatRepository.dao.loadMessages(run.sessionId)
-        val lastAssistant = msgs.lastOrNull { it.role == "assistant" }
-        val responseText = lastAssistant?.let { extractText(it.partsJson) }
-        SubagentResult(
-            text = responseText ?: "",
-            status = if (finished) "completed" else "timeout",
-            timedOut = !finished,
-        )
+        // Headless-safe send: the pre-send compact dialog can never park the
+        // task (a headless VM has nobody to answer it).
+        vm.sendMessageHeadless(task)
+
+        withContext(Dispatchers.Default) {
+            // ── Phase 1: START ────────────────────────────────────────────
+            val startDeadlineMs = 60_000L
+            val t0 = System.currentTimeMillis()
+            var started = vm.isStreaming.value
+            while (!started && System.currentTimeMillis() - t0 < startDeadlineMs) {
+                delay(200)
+                if (vm.isStreaming.value) {
+                    started = true
+                } else if (dao.loadMessages(run.sessionId).any {
+                        // Only THIS run's task row counts (a fresh USER row).
+                        // Sibling runs sharing the session also append rows
+                        // while we wait — but only assistant/tool rows; the
+                        // parent is parked in our tool call, so a new user
+                        // row can only be ours.
+                        it.id !in beforeIds && it.role == "user"
+                    }) {
+                    // A row landed without the flag (instant error path) —
+                    // treat the turn as begun and let phase 2 finish fast.
+                    started = true
+                }
+                if (run.deferred.isCancelled) throw CancellationException("subagent cancelled")
+            }
+            if (!started) {
+                return@withContext SubagentResult(
+                    text = "subagent_turn_never_started (send was dropped — check the session's model/provider binding)",
+                    status = "error",
+                )
+            }
+
+            // ── Phase 2: END ──────────────────────────────────────────────
+            // `_isStreaming` is claimed for the WHOLE agentic turn (tool calls
+            // included) and cleared in the stream epilogue; require it false
+            // across a 2 s stability grace so a transient flicker is not read
+            // as completion.
+            val endDeadlineMs = System.currentTimeMillis() + timeoutSec * 1000L
+            var quietMs = 0L
+            var finished = false
+            while (System.currentTimeMillis() < endDeadlineMs) {
+                delay(250)
+                if (run.deferred.isCancelled) throw CancellationException("subagent cancelled")
+                if (!vm.isStreaming.value) {
+                    quietMs += 250
+                    if (quietMs >= 2_000) {
+                        finished = true
+                        break
+                    }
+                } else {
+                    quietMs = 0L
+                }
+            }
+            if (!finished) {
+                // Timed out — cancel the child stream so an orphan turn does
+                // not keep running (and writing) after we hand back "timeout".
+                runCatching { vm.cancelStream() }
+            }
+
+            // ── Result: THIS turn's rows only ────────────────────────────
+            val newRows = dao.loadMessages(run.sessionId).filter { it.id !in beforeIds }
+            // Anchor on our own task row: the reply is the last assistant row
+            // AFTER it, so a sibling run's interleaved output (shared session)
+            // cannot stand in for this run's answer.
+            val taskRowIdx = newRows.indexOfFirst { it.role == "user" }
+            val afterTask = if (taskRowIdx >= 0) newRows.drop(taskRowIdx + 1) else newRows
+            val responseText = afterTask.lastOrNull { it.role == "assistant" }
+                ?.let { extractText(it.partsJson) }
+            SubagentResult(
+                text = responseText
+                    ?: if (finished) "(subagent turn finished without an assistant reply)" else "",
+                status = when {
+                    !finished -> "timeout"
+                    responseText != null -> "completed"
+                    else -> "error"
+                },
+                timedOut = !finished,
+            )
+        }
     }
 
     /**
@@ -352,17 +446,14 @@ object SubagentRunner {
     }
 
     /**
-     * Drop the private VM + store and roll the session's depth back. Runs
-     * exactly once per run — cancel(), the wait=true finally and pruneStale
-     * can all reach a run, and a second depth decrement would leak a level
-     * and eventually block legitimate spawns.
+     * Drop the private VM + store. Runs exactly once per run — cancel(), the
+     * wait=true finally and pruneStale can all reach a run.
      */
     private fun releaseRun(run: SubagentRun) {
         if (!run.released.compareAndSet(false, true)) return
         runCatching { run.store?.clear() }
         run.store = null
         run.vm = null
-        depthMap.compute(run.parentSessionId) { _, d -> (d ?: 1) - 1 }
     }
 
     /** Plain text of a message's parts JSON ([{type:text,value:...}]). */

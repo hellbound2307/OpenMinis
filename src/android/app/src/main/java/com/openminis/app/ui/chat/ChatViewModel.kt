@@ -6283,13 +6283,27 @@ class ChatViewModel(
     fun sendMessage(text: String) = sendMessage(text, skipContextCheck = false)
 
     /**
+     * Headless-safe send for background drivers (Telegram remote, subagent
+     * runs): identical to [sendMessage], except the pre-send context check
+     * can NEVER park the turn behind a UI dialog. A headless ChatViewModel
+     * has nobody to answer "compact before send?" — the send was silently
+     * dropped, `isStreaming` never flipped true, and the caller (remote
+     * poller / subagent waiter) concluded the turn had already finished with
+     * the PREVIOUS turn's text. Downgrade ASK_USER to the auto-compact path
+     * (compact silently, then send) so a headless turn always goes through.
+     */
+    fun sendMessageHeadless(text: String) = sendMessage(text, skipContextCheck = false, headless = true)
+
+    /**
      * @param skipContextCheck set by the pre-send context dialog's own actions,
      *   which have already made the compact decision. Without it the re-entrant
      *   send would re-evaluate the same (still stale until the next usage
      *   chunk) token count and pop the dialog again — iOS guards the identical
      *   re-entry with `skipCompactCheck`.
+     * @param headless true for background drivers ([sendMessageHeadless]) —
+     *   the ASK_USER dialog branch is downgraded to silent compact-and-send.
      */
-    private fun sendMessage(text: String, skipContextCheck: Boolean) {
+    private fun sendMessage(text: String, skipContextCheck: Boolean, headless: Boolean = false) {
         // [T-android-paste-mediaref] `[Pasted#N]` markers are NOT expanded here
         // any more.
         //
@@ -6337,6 +6351,19 @@ class ChatViewModel(
                     return
                 }
                 PreSendContextAction.ASK_USER -> {
+                    if (headless) {
+                        // [T-android-headless-send] No UI exists to answer the
+                        // dialog — parking here would drop the send forever.
+                        // Compact silently and send, same as auto-compact on.
+                        AppLogger.info(
+                            TAG,
+                            "[Context] pre-send near capacity — headless send, auto-compacting (no UI to ask)",
+                        )
+                        pendingSendText = text
+                        _inputText.value = ""
+                        compactAndSendPending()
+                        return
+                    }
                     // Park the text on the VM (not the composer) so the dialog
                     // owns it; cancelCompactBeforeSend puts it back.
                     pendingSendText = text
@@ -9184,6 +9211,11 @@ class ChatViewModel(
                 appContext = context,
                 parentSessionId = activeSessionId,
                 argsJson = argsJson,
+                // WHO is calling decides nesting depth (this == a subagent's
+                // own VM ⇒ depth ≥ 1; the UI/top-level VM ⇒ depth 0). Without
+                // the caller identity, every second sibling spawn from the
+                // same session was refused as "recursion limit reached".
+                callerVm = this,
             )
             "agent_status" -> com.openminis.app.tools.subagent.SubagentRunner.executeStatus(argsJson)
             else -> ToolExecutionResult("Unknown tool: $name", false)
