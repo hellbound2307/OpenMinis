@@ -1,6 +1,7 @@
 package com.openminis.app.telegram
 
 import okhttp3.OkHttpClient
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
@@ -221,5 +222,5 @@ internal object TelegramRemoteClient {
         }.getOrNull()
     }
 
-    private val MEDIA_JSON = okhttp3.MediaType.Companion.parse("application/json; charset=utf-8")
+    private val MEDIA_JSON = "application/json; charset=utf-8".toMediaType()
 }

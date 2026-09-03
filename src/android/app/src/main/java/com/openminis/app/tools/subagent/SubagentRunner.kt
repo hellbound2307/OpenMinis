@@ -218,7 +218,7 @@ object SubagentRunner {
                 run.deferred.isCompleted -> "completed"
                 else -> "running"
             }
-            val result = run.deferred.getCompletedOrNull()
+            val result = runCatching { run.deferred.getCompleted() }.getOrNull()
             val preview = if (result != null) {
                 "\n\n" + result.text.take(2000)
             } else ""
