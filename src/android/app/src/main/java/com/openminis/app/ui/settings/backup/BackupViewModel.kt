@@ -690,10 +690,28 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val entries = withContext(Dispatchers.IO) {
                     if (remote.backend == "telegram") {
-                        // No folder tree — packages are indexed in one pinned
-                        // message, so the browser side stays empty and the
-                        // package list carries everything.
-                        emptyList()
+                        // Telegram has no folder tree — every package is
+                        // recorded in the one pinned index document. Returning
+                        // an empty list here made the RESTORE browser (the
+                        // screen every Telegram restore route lands on) a
+                        // permanently empty folder: the packages existed, the
+                        // download/restore machinery worked, but no row ever
+                        // appeared to tap. Map the index into file entries so
+                        // the standard browse → confirm → download flow runs
+                        // unchanged; `path` carries the package key (its name)
+                        // that downloadServerPackage passes back to
+                        // TelegramClient.download.
+                        com.openminis.app.backup.remote.TelegramClient(getApplication())
+                            .listPackages(remote)
+                            .map { pkg ->
+                                com.openminis.app.backup.remote.RcloneChunkedUpload.RemoteEntry(
+                                    path = pkg.key,
+                                    name = pkg.displayName,
+                                    isDirectory = false,
+                                    size = pkg.size,
+                                    modified = pkg.modified,
+                                )
+                            }
                     } else {
                         val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
                         store.syncToRclone()
