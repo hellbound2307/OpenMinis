@@ -87,6 +87,27 @@ class TelegramRemoteService : Service() {
         var isRunning = false
             private set
 
+        // ── Device-side diagnostics (read by the Settings screen) ──────────
+        // A remote agent that silently dies looks identical to one that was
+        // never enabled — the user just sees "the bot ignores me". These
+        // volatile fields are the service's heartbeat, surfaced on the
+        // Telegram Remote screen so a dead poll loop, a wrong pairing or a
+        // persistent API error are VISIBLE without logcat.
+
+        /** Last time the poll loop completed a getUpdates round (any result). */
+        @Volatile
+        var lastPollAtMs: Long = 0L
+            private set
+
+        /** Last poll/send error text, cleared on the next clean cycle. */
+        @Volatile
+        var lastPollError: String? = null
+            private set
+
+        /** Chat id of the last message ignored as unauthorized (pairing check). */
+        @Volatile
+        var lastIgnoredChat: String? = null
+
         fun start(context: Context) {
             val intent = Intent(context, TelegramRemoteService::class.java)
             try {
@@ -137,20 +158,19 @@ class TelegramRemoteService : Service() {
         // answers control commands inline and feeds the channel — so /stop
         // and /status stay live even while a long turn runs.
         scope.launch { turnWorker() }
-        if (app?.subsystemsReady() == true) {
-            scope.launch { pollLoop() }
-        } else {
-            AppLogger.warning(TAG, "subsystems not ready — waiting for start command")
-        }
+        // Start the poll loop UNCONDITIONALLY: pollLoop itself waits for
+        // subsystem readiness, so a service started at boot (or by
+        // START_STICKY before Application init finished) self-starts the
+        // moment the repositories come up — instead of sitting as a live
+        // process with no loop until the user happened to re-toggle.
+        scope.launch { pollLoop() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Restart loop if it died (e.g. START_STICKY restart, or subsystems
-        // came up after our onCreate early-return). pollLoop guards itself
-        // with a compareAndSet, so rapid restarts cannot double-launch it.
-        if (app?.subsystemsReady() == true) {
-            scope.launch { pollLoop() }
-        }
+        // Restart loop if it died (e.g. after !cfg.enabled broke it and the
+        // user re-enabled). pollLoop guards itself with a compareAndSet, so
+        // rapid restarts cannot double-launch it.
+        scope.launch { pollLoop() }
         return START_STICKY
     }
 
@@ -168,6 +188,13 @@ class TelegramRemoteService : Service() {
         if (!loopActive.compareAndSet(false, true)) return
         AppLogger.info(TAG, "poll loop started")
         try {
+            // Boot/START_STICKY starts can land before Application init has
+            // finished; wait here (bounded) rather than never starting.
+            var waited = 0
+            while (app?.subsystemsReady() != true && waited < 60_000) {
+                delay(1_000)
+                waited += 1_000
+            }
             var announcedUnconfigured = false
             while (scope.isActive) {
                 val cfg = TelegramRemoteStore.load(this)
@@ -200,6 +227,8 @@ class TelegramRemoteService : Service() {
                         TelegramRemoteClient.getUpdates(cfg.botToken, cfg.updateOffset)
                     }
                     lastBackoffMs = 1_000L
+                    lastPollAtMs = System.currentTimeMillis()
+                    lastPollError = null
                     if (!turnBusy) updateNotification("Telegram remote active")
                     for (u in updates) {
                         if (!scope.isActive) break
@@ -212,6 +241,7 @@ class TelegramRemoteService : Service() {
                     handlePollError(e, cfg)
                     delay(lastBackoffMs)
                 } catch (e: Exception) {
+                    lastPollError = e.message ?: e::class.java.simpleName
                     AppLogger.warning(TAG, "poll error: ${e.message}")
                     delay(lastBackoffMs)
                 }
@@ -249,6 +279,8 @@ class TelegramRemoteService : Service() {
     private suspend fun handlePollError(e: Exception, cfg: TelegramRemoteStore.Config) {
         val retryable = (e as? TelegramRemoteClient.RemoteException)?.canRetry ?: true
         AppLogger.warning(TAG, "telegram poll error: ${e.message}")
+        lastPollAtMs = System.currentTimeMillis()
+        lastPollError = e.message ?: e::class.java.simpleName
         lastBackoffMs = (lastBackoffMs * 2).coerceAtMost(MAX_RETRY_DELAY_MS)
         if (!retryable && cfg.isConfigured) {
             // Auth/config problems — surface to the phone user.
@@ -268,8 +300,12 @@ class TelegramRemoteService : Service() {
         val chat = message.optJSONObject("chat") ?: return
         val chatId = chat.optString("id", null) ?: return
         if (chatId != TelegramRemoteStore.chatId(this)) {
-            // Unauthorized sender — ignore (no reply, no turn).
+            // Unauthorized sender — ignore (no reply, no turn). Recorded so a
+            // PAIRING MISMATCH is diagnosable from the Settings screen: the
+            // user sees "messages from chat 42 are being ignored" and knows
+            // the stored chat id doesn't match the one they write from.
             AppLogger.info(TAG, "ignoring message from unauthorized chat $chatId")
+            lastIgnoredChat = chatId
             return
         }
         val text = message.optString("text", null).takeIf { it != null }

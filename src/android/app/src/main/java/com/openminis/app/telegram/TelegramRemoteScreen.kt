@@ -18,13 +18,16 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -35,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import com.openminis.app.backup.remote.TelegramClient
 import com.openminis.app.ui.settings.SettingsSection
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -60,6 +64,25 @@ fun TelegramRemoteScreen(onBack: () -> Unit) {
     var chatId by remember { mutableStateOf(TelegramRemoteStore.chatId(context)) }
     var status by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+
+    // ── Live heartbeat ────────────────────────────────────────────────────
+    // A remote agent that dies silently is indistinguishable from one that
+    // was never enabled — the user just sees "the bot ignores me". Re-read
+    // the service's volatile diagnostics every 2s so this screen shows
+    // whether polling is actually alive, when it last talked to Telegram,
+    // what error it last hit, and whether messages from ANOTHER chat are
+    // being ignored (the classic pairing-mismatch signature).
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            delay(2_000)
+        }
+    }
+    val serviceRunning = TelegramRemoteService.isRunning
+    val lastPollAgo = nowMs - TelegramRemoteService.lastPollAtMs
+    val lastError = TelegramRemoteService.lastPollError
+    val ignoredChat = TelegramRemoteService.lastIgnoredChat
 
     fun setEnabled(value: Boolean) {
         enabled = value
@@ -122,16 +145,28 @@ fun TelegramRemoteScreen(onBack: () -> Unit) {
                                 runCatching {
                                     val t = TelegramRemoteClient.normalizeBotToken(token.trim())
                                     TelegramRemoteStore.saveBotToken(context, t)
-                                    // Verify + find the paired chat.
-                                    val client = TelegramClient(context)
-                                    val detected = client.detectChatId(t)
-                                    if (detected == null) {
-                                        "Token valid, but no chat has messaged this bot yet. " +
-                                            "Send any message to the bot from your Telegram first, then Connect again."
-                                    } else {
-                                        TelegramRemoteStore.saveChatId(context, detected.first)
-                                        chatId = detected.first
-                                        "Connected. Paired with chat ${detected.first} (${detected.second})."
+                                    // The service's own long-poll holds the bot's
+                                    // update stream — a concurrent getUpdates here
+                                    // 409s ("Conflict: terminated by other
+                                    // getUpdates request") and pairing silently
+                                    // never completes. Pause it for the detection
+                                    // round, then bring it back for whoever had it on.
+                                    val serviceWasUp = TelegramRemoteService.isRunning
+                                    if (serviceWasUp) TelegramRemoteService.stop(context)
+                                    try {
+                                        val client = TelegramClient(context)
+                                        val detected = client.detectChatId(t)
+                                        if (detected == null) {
+                                            "Token valid, but no chat has messaged this bot yet. " +
+                                                "Send any message to the bot from your Telegram first, then Connect again."
+                                        } else {
+                                            TelegramRemoteStore.saveChatId(context, detected.first)
+                                            chatId = detected.first
+                                            TelegramRemoteService.lastIgnoredChat = null
+                                            "Connected. Paired with chat ${detected.first} (${detected.second})."
+                                        }
+                                    } finally {
+                                        if (serviceWasUp) TelegramRemoteService.start(context)
                                     }
                                 }
                             }
@@ -162,6 +197,57 @@ fun TelegramRemoteScreen(onBack: () -> Unit) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+
+                // ── Diagnostics + outbound proof ──────────────────────────
+                Spacer(Modifier.height(12.dp))
+                SettingsSection("Diagnostics") {
+                    Text(
+                        "Service: " + if (serviceRunning) "running" else "stopped",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (serviceRunning) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.error,
+                    )
+                    Text(
+                        "Last poll: " + if (TelegramRemoteService.lastPollAtMs == 0L) "never" else "${lastPollAgo / 1000}s ago",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    lastError?.let {
+                        Text(
+                            "Last error: $it",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    ignoredChat?.let {
+                        Text(
+                            "Ignoring messages from chat $it — that's not the paired chat. " +
+                                "Tap Connect bot while a message from YOUR chat is the newest one the bot received.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            busy = true
+                            scope.launch {
+                                val result = withContext(Dispatchers.IO) {
+                                    runCatching {
+                                        TelegramRemoteClient.sendText(
+                                            TelegramRemoteStore.botToken(context), chatId,
+                                            "✅ Minis test message — the bot can send to this chat.",
+                                        )
+                                        "Test message sent — check Telegram."
+                                    }.getOrElse { "Send failed: ${it.message}" }
+                                }
+                                status = result
+                                busy = false
+                            }
+                        },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Send test message") }
                 }
             }
 
