@@ -141,34 +141,32 @@ object AgentTools {
         propertyOrdering = listOf("tool_title", "scope", "keywords"),
     )
 
-    // [T-android-subagent-tool] spawn_agent: context-isolated child agent.
-    // The child runs in its own session with a fresh context window, sharing
-    // the same providers and tools (except spawn_agent itself). The parent
-    // receives the final text; the child session appears in the session list.
+    // [T-android-subagent-tool] spawn_agent: a subagent that runs WITHIN the
+    // current conversation. Its turn executes against this same session (a
+    // private ViewModel bound to it), so the task, its tool calls and its
+    // final answer all land in this session's transcript — no separate chat
+    // session is created, and the full conversation history is inherited
+    // automatically. The parent receives the final text as the tool result.
     private fun spawnAgentDefinition(): AgentToolDefinition = AgentToolDefinition(
         name = "spawn_agent",
-        description = "Spawn a child agent to work on a subtask. " +
-            "By default (context=\"inherit\") the child receives a bounded transcript of the " +
-            "current conversation, so it continues the SAME discussion — use it whenever the " +
-            "subtask depends on what happened earlier (\"summarize what we decided\", " +
-            "\"continue that draft\"). With context=\"fresh\" the child starts from a blank " +
-            "context with only the task text — better for self-contained work like deep " +
-            "research or long file analysis. The child has the same provider access and most " +
-            "of the same tools (except spawn_agent itself — subagents cannot spawn further " +
-            "subagents). The child's session appears in the session list for inspection. " +
-            "When wait=true (default), the tool blocks until the child finishes and " +
-            "returns the final text. When wait=false, the tool returns a run_id " +
-            "immediately; poll with agent_status to check progress.",
+        description = "Spawn a subagent that runs WITHIN this same conversation — its work " +
+            "appears in this session's transcript (no new chat is created) and it sees the " +
+            "full conversation history automatically. Use it for subtasks that benefit from a " +
+            "focused pass with full context: deep research on a file or topic just discussed, " +
+            "drafting a long document, multi-step investigation. The subagent has the same " +
+            "provider access and most of the same tools (except spawn_agent itself — " +
+            "subagents cannot spawn further subagents). When wait=true (default), the tool " +
+            "blocks until the subagent finishes and returns the final text. When wait=false, " +
+            "the tool returns a run_id immediately; poll with agent_status to check progress.",
         parameters = mapOf(
             "tool_title" to AgentToolParam("string", "A concise 5-10 word summary of what this tool call does, shown to the user (e.g. 'Research X topic', 'Draft Y document'). Use the same language as the user."),
-            "task" to AgentToolParam("string", "The instruction for the subagent. Treated as the subagent's user message (after the inherited conversation context, when context=inherit). Be specific about what to do and what to return."),
-            "context" to AgentToolParam("string", "\"inherit\" (default) passes a bounded transcript of the current conversation to the subagent so it continues the same discussion. \"fresh\" passes only the task text, for self-contained subtasks."),
-            "label" to AgentToolParam("string", "Optional short label for the child session, visible in the session list. Defaults to the first words of task."),
-            "wait" to AgentToolParam("boolean", "When true (default), block until the child finishes and return the result. When false, return a run_id immediately and let the child run in the background."),
-            "timeout_sec" to AgentToolParam("integer", "Maximum seconds to wait for the child (default 600, max 1800). Ignored when wait=false."),
+            "task" to AgentToolParam("string", "The instruction for the subagent. It is added to THIS conversation as the subagent's task message, so the subagent continues the same discussion — be specific about what to do and what to return."),
+            "label" to AgentToolParam("string", "Optional short label identifying the run in agent_status output. Defaults to the first words of task."),
+            "wait" to AgentToolParam("boolean", "When true (default), block until the subagent finishes and return the result. When false, return a run_id immediately and let it run in the background."),
+            "timeout_sec" to AgentToolParam("integer", "Maximum seconds to wait for the subagent (default 600, max 1800). Ignored when wait=false."),
         ),
         required = listOf("tool_title", "task"),
-        propertyOrdering = listOf("tool_title", "task", "context", "label", "wait", "timeout_sec"),
+        propertyOrdering = listOf("tool_title", "task", "label", "wait", "timeout_sec"),
     )
 
     // [T-android-subagent-tool] agent_status: query subagent runs.
