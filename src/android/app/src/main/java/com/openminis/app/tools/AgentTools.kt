@@ -48,6 +48,10 @@ object AgentTools {
         add(waitAndResumeDefinition())
         add(timerListDefinition())
         add(timerCancelDefinition())
+        // [T-android-job-tools] Background job control for the sandbox shell.
+        add(jobStartDefinition())
+        add(jobPollDefinition())
+        add(jobKillDefinition())
     }
 
     // Aligned with iOS AIChatViewModel.swift:4982-4993
@@ -210,6 +214,51 @@ object AgentTools {
         parameters = mapOf(
             "tool_title" to AgentToolParam("string", "A concise 5-10 word summary."),
             "id" to AgentToolParam("string", "The timer id to cancel."),
+        ),
+        required = listOf("tool_title", "id"),
+        propertyOrdering = listOf("tool_title", "id"),
+    )
+
+    // [T-android-job-tools] job_start: run a command DETACHED in the sandbox.
+    private fun jobStartDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = "job_start",
+        description = "Start a long-running background job in the sandbox WITHOUT " +
+            "blocking the turn (a dev server, a watcher, a long build, a download). " +
+            "The command runs detached (setsid), its output goes to a log file, and " +
+            "you can check on it later with job_poll or stop it with job_kill. " +
+            "Unlike shell_execute there is no timeout that kills the command. " +
+            "Use case: start a server with job_start, keep answering the user, " +
+            "later job_poll to see if it is ready, then curl it from shell_execute.",
+        parameters = mapOf(
+            "tool_title" to AgentToolParam("string", "A concise 5-10 word summary (e.g. 'Start dev server in background')."),
+            "command" to AgentToolParam("string", "The command to run detached. Multi-line is fine; it is written to a script file and executed with sh. Keep under 4000 chars."),
+            "label" to AgentToolParam("string", "Optional short label shown in job_poll listings. Defaults to the first words of command."),
+        ),
+        required = listOf("tool_title", "command"),
+        propertyOrdering = listOf("tool_title", "command", "label"),
+    )
+
+    // [T-android-job-tools] job_poll: check background job status/log.
+    private fun jobPollDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = "job_poll",
+        description = "Check the status of a background job started with job_start. " +
+            "With id: returns RUNNING/DONE/MISSING plus the last ~3KB of the job's log " +
+            "and its exit code when finished. Without id: lists all known jobs with status.",
+        parameters = mapOf(
+            "tool_title" to AgentToolParam("string", "A concise 5-10 word summary."),
+            "id" to AgentToolParam("string", "Optional job id from job_start. Omit to list all jobs."),
+        ),
+        required = listOf("tool_title"),
+        propertyOrdering = listOf("tool_title", "id"),
+    )
+
+    // [T-android-job-tools] job_kill: stop a background job.
+    private fun jobKillDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = "job_kill",
+        description = "Kill a background job (its whole process group) started with job_start.",
+        parameters = mapOf(
+            "tool_title" to AgentToolParam("string", "A concise 5-10 word summary."),
+            "id" to AgentToolParam("string", "The job id to kill."),
         ),
         required = listOf("tool_title", "id"),
         propertyOrdering = listOf("tool_title", "id"),

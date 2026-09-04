@@ -9229,6 +9229,20 @@ class ChatViewModel(
                 val id = try { JSONObject(argsJson).optString("id", "") } catch (_: Exception) { "" }
                 com.openminis.app.tools.timer.TimerTools.executeCancel(id, context)
             }
+            // [T-android-job-tools] Background job control. All three are
+            // suspend (they round-trip through the session's persistent shell).
+            "job_start" -> com.openminis.app.tools.jobs.JobTools.executeStart(
+                argsJson = argsJson,
+                sessionId = activeSessionId,
+            )
+            "job_poll" -> com.openminis.app.tools.jobs.JobTools.executePoll(
+                argsJson = argsJson,
+                sessionId = activeSessionId,
+            )
+            "job_kill" -> com.openminis.app.tools.jobs.JobTools.executeKill(
+                argsJson = argsJson,
+                sessionId = activeSessionId,
+            )
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
     }
