@@ -54,6 +54,8 @@ object AgentTools {
         add(jobKillDefinition())
         // [T-android-ask-user-tool] Mid-turn question to the user.
         add(askUserDefinition())
+        // [T-android-lan-share] Share a sandbox dir over the LAN.
+        add(lanShareDefinition())
     }
 
     // Aligned with iOS AIChatViewModel.swift:4982-4993
@@ -267,8 +269,7 @@ object AgentTools {
     )
 
     // [T-android-ask-user-tool] ask_user: mid-turn decision point.
-    private fun askUserDefinition(): AgentToolDefinition = AgentToolDefinition(
-        name = "ask_user",
+    private fun askUserDefinition(): AgentToolDefinition = AgentToolDefinition(        name = "ask_user",
         description = "Ask the user a question when you hit a genuine decision " +
             "point that cannot be resolved from context (an ambiguity that changes " +
             "the outcome, a destructive action that needs confirmation, or a " +
@@ -298,5 +299,24 @@ object AgentTools {
         ),
         required = listOf("tool_title"),
         propertyOrdering = listOf("tool_title", "run_id"),
+    )
+
+    // [T-android-lan-share] lan_share: serve a sandbox directory over LAN.
+    private fun lanShareDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = "lan_share",
+        description = "Share a directory from the sandbox over the local network " +
+            "(Wi-Fi or hotspot) so the user can open it from a laptop or any other " +
+            "device. Starts a python3 http.server as a background job bound to " +
+            "0.0.0.0 and returns ready-to-open http://<phone-ip>:<port>/ URLs. " +
+            "Tip: write an index.html into the directory first for a nicer page. " +
+            "Stop the server with job_kill using the returned job id. " +
+            "The share dies when the app process dies (on-device sandbox).",
+        parameters = mapOf(
+            "tool_title" to AgentToolParam("string", "A concise 5-10 word summary (e.g. 'Share report folder over LAN')."),
+            "port" to AgentToolParam("integer", "TCP port to serve on (default 8080, range 1024-65535)."),
+            "path" to AgentToolParam("string", "Sandbox directory to serve. Must be under /var/minis/ (default /var/minis/workspace)."),
+        ),
+        required = listOf("tool_title"),
+        propertyOrdering = listOf("tool_title", "port", "path"),
     )
 }

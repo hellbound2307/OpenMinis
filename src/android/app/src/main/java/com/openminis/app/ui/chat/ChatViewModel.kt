@@ -9250,6 +9250,11 @@ class ChatViewModel(
                 sessionId = activeSessionId,
                 context = context,
             )
+            // [T-android-lan-share] Serve a sandbox dir over the LAN.
+            "lan_share" -> com.openminis.app.tools.lan.LanShareTools.executeStart(
+                argsJson = argsJson,
+                sessionId = activeSessionId,
+            )
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
     }
