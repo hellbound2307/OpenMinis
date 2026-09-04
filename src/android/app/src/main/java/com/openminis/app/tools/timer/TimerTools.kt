@@ -76,7 +76,7 @@ object TimerTools {
             set(Calendar.MILLISECOND, 0)
         }.timeInMillis
 
-        val wakeMessage = "⏰ Timer fired (${humanDuration(delaySec)} ago): $note"
+        val wakeMessage = "⏰ Timer fired (${humanDuration(delaySec.toLong())} ago): $note"
         val label = "$TIMER_PREFIX $note"
 
         val task = ScheduledTask(
@@ -94,7 +94,7 @@ object TimerTools {
 
         AppLogger.info(TAG, "timer set: id=${saved.id} delay=${delaySec}s fireAt=$fireAt session=$sessionId")
         return ToolExecutionResult(
-            output = "Timer set. Fire in ${humanDuration(delaySec)}. " +
+            output = "Timer set. Fire in ${humanDuration(delaySec.toLong())}. " +
                 "Timer id: ${saved.id}. " +
                 "The agent will be re-invoked when the timer fires. " +
                 "End your turn now.",
