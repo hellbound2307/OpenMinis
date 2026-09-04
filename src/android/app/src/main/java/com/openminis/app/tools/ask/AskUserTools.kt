@@ -185,7 +185,7 @@ class AskUserReplyReceiver : BroadcastReceiver() {
                     timeoutMs = 60_000L,
                 )
             } catch (e: Exception) {
-                AppLogger.error(TAG, "failed to forward answer: ${e.message}")
+                AppLogger.error("AskUserReply", "failed to forward answer: ${e.message}")
             }
         }
     }
