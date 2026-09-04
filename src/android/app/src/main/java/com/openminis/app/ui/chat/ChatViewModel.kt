@@ -9218,6 +9218,17 @@ class ChatViewModel(
                 callerVm = this,
             )
             "agent_status" -> com.openminis.app.tools.subagent.SubagentRunner.executeStatus(argsJson)
+            // [T-android-timer-tool] wait_and_resume, timer_list, timer_cancel.
+            "wait_and_resume" -> com.openminis.app.tools.timer.TimerTools.executeSet(
+                argsJson = argsJson,
+                sessionId = activeSessionId,
+                context = context,
+            )
+            "timer_list" -> com.openminis.app.tools.timer.TimerTools.executeList(context)
+            "timer_cancel" -> {
+                val id = try { JSONObject(argsJson).optString("id", "") } catch (_: Exception) { "" }
+                com.openminis.app.tools.timer.TimerTools.executeCancel(id, context)
+            }
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
     }

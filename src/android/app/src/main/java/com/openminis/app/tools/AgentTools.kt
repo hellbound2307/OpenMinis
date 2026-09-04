@@ -44,6 +44,10 @@ object AgentTools {
         // Depth / concurrency limits are enforced at runtime by SubagentRunner.
         add(spawnAgentDefinition())
         add(agentStatusDefinition())
+        // [T-android-timer-tool] Always expose wait_and_resume / timer_list / timer_cancel.
+        add(waitAndResumeDefinition())
+        add(timerListDefinition())
+        add(timerCancelDefinition())
     }
 
     // Aligned with iOS AIChatViewModel.swift:4982-4993
@@ -55,7 +59,7 @@ object AgentTools {
             "Default timeout is 15 minutes.",
         parameters = mapOf(
             "tool_title" to AgentToolParam("string", "A concise 5-10 word summary of what this tool call does, shown to the user (e.g. 'Install Python data analysis packages', 'List files in home directory'). Use the same language as the user."),
-            "command" to AgentToolParam("string", "The shell command to execute. Supports multi-line commands directly — no special escaping needed. Keep under 1000 chars; for longer scripts, write to a file with file_write first, then run it."),
+            "command" to AgentToolParam("string", "The shell command to execute. Supports multi-line commands directly — no special escaping needed. Keep under 4000 chars; for longer scripts, write to a file with file_write first, then run it."),
             "timeout" to AgentToolParam("integer", "Timeout in seconds (default: 900). Use a larger value for long-running commands like package installs."),
             "delay" to AgentToolParam("integer", "Delay in seconds before execution begins. The tool blocks the agent flow during this wait WITHOUT occupying the shell, so other concurrent tasks can use it. Use this instead of sleep commands to avoid resource contention."),
         ),
@@ -167,6 +171,48 @@ object AgentTools {
         ),
         required = listOf("tool_title", "task"),
         propertyOrdering = listOf("tool_title", "task", "label", "wait", "timeout_sec"),
+    )
+
+    // [T-android-timer-tool] wait_and_resume: set a timer that resumes the
+    // current session after the delay, with a wake message.
+    private fun waitAndResumeDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = "wait_and_resume",
+        description = "End the current turn and set a timer that will re-invoke " +
+            "the agent in the current session after the specified delay. " +
+            "Use this when you need to wait for something to finish (a build, a " +
+            "download, a time-based event) and then continue working. " +
+            "The timer message will appear as a user message in the session. " +
+            "End your turn after calling this: the agent will be woken up " +
+            "when the timer fires. " +
+            "Minute granularity: delays round to the nearest minute.",
+        parameters = mapOf(
+            "tool_title" to AgentToolParam("string", "A concise 5-10 word summary (e.g. 'Wait for build to finish', 'Check back in 30 minutes')."),
+            "delay_seconds" to AgentToolParam("integer", "Delay in seconds before the agent is re-invoked (default 60, max 604800 / 7 days). Minimum 5."),
+            "note" to AgentToolParam("string", "Optional note to include in the wake message. Defaults to 'Timer'."),
+        ),
+        required = listOf("tool_title"),
+        propertyOrdering = listOf("tool_title", "delay_seconds", "note"),
+    )
+
+    // [T-android-timer-tool] timer_list: list active timers.
+    private fun timerListDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = "timer_list",
+        description = "List all active timers set by wait_and_resume. Shows id, note, and time remaining.",
+        parameters = mapOf("tool_title" to AgentToolParam("string", "A concise 5-10 word summary.")),
+        required = listOf("tool_title"),
+        propertyOrdering = listOf("tool_title"),
+    )
+
+    // [T-android-timer-tool] timer_cancel: cancel a timer by id.
+    private fun timerCancelDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = "timer_cancel",
+        description = "Cancel a timer set by wait_and_resume. Use the id from the timer_set response or timer_list.",
+        parameters = mapOf(
+            "tool_title" to AgentToolParam("string", "A concise 5-10 word summary."),
+            "id" to AgentToolParam("string", "The timer id to cancel."),
+        ),
+        required = listOf("tool_title", "id"),
+        propertyOrdering = listOf("tool_title", "id"),
     )
 
     // [T-android-subagent-tool] agent_status: query subagent runs.
