@@ -475,6 +475,12 @@
             </intent-filter>
         </receiver>
 
+        <!-- Ask-user inline reply receiver (fork): forwards notification
+             RemoteInput answers into the session as user turns. -->
+        <receiver
+            android:name=".tools.ask.AskUserReplyReceiver"
+            android:exported="false" />
+
         <!-- Alarm broadcast receiver (also handles BOOT_COMPLETED for re-scheduling) -->
         <receiver
             android:name=".offload.AlarmReceiver"

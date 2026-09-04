@@ -38,6 +38,41 @@ else
     echo "✓ Downloaded: $ROOTFS_FILE ($(du -h "$ROOTFS_FILE" | cut -f1))"
 fi
 
+# --- ripgrep (rg) + runtime libs for the sandbox overlay [T-android-ripgrep] ---
+# Vendored into assets/default_mount so the agent's sandbox has rg from first
+# boot and it SURVIVES rootfs resets (overlay is re-applied on every boot).
+# Alpine ships rg in the community repo; it needs libpcre2-8 + libgcc_s from
+# main. All three are plain gzip-tar apks for aarch64 — extracted directly.
+RG_VERSION="14.1.1-r0"
+PCRE2_VERSION="10.43-r0"
+LIBGCC_VERSION="14.2.0-r4"
+ALPINE_MAIN_URL="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/main/aarch64"
+ALPINE_COMMUNITY_URL="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/community/aarch64"
+RG_OVERLAY="$ASSETS_DIR/default_mount"
+
+fetch_apk_extract () {
+    # $1 = full apk url, $2 = dest cache file, $3 = dest extract dir
+    if [ ! -f "$2" ]; then
+        echo "Downloading $(basename "$2")..."
+        curl -fSL -o "$2" "$1"
+    fi
+    mkdir -p "$3"
+    tar xzf "$2" -C "$3"
+}
+
+RG_TMP="$(mktemp -d)"
+trap 'rm -rf "$RG_TMP"' EXIT
+
+fetch_apk_extract "$ALPINE_COMMUNITY_URL/ripgrep-$RG_VERSION.apk" "$RG_TMP/rg.apk" "$RG_TMP/rg"
+fetch_apk_extract "$ALPINE_MAIN_URL/pcre2-$PCRE2_VERSION.apk" "$RG_TMP/pcre2.apk" "$RG_TMP/pcre2"
+fetch_apk_extract "$ALPINE_MAIN_URL/libgcc-$LIBGCC_VERSION.apk" "$RG_TMP/libgcc.apk" "$RG_TMP/libgcc"
+
+mkdir -p "$RG_OVERLAY/usr/local/bin" "$RG_OVERLAY/usr/lib"
+install -m 0755 "$RG_TMP/rg/usr/bin/rg" "$RG_OVERLAY/usr/local/bin/rg"
+cp -a "$RG_TMP/pcre2/usr/lib/libpcre2-8.so.0" "$RG_TMP/pcre2/usr/lib/libpcre2-8.so.0.12.0" "$RG_OVERLAY/usr/lib/"
+cp -a "$RG_TMP/libgcc/usr/lib/libgcc_s.so.1" "$RG_OVERLAY/usr/lib/"
+echo "✓ ripgrep $RG_VERSION + pcre2/libgcc vendored into default_mount"
+
 # --- PRoot binary ---
 if [ -f "$PROOT_FILE" ]; then
     echo "✓ PRoot binary already exists: $PROOT_FILE"

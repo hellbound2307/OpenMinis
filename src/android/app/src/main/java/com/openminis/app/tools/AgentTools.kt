@@ -52,6 +52,8 @@ object AgentTools {
         add(jobStartDefinition())
         add(jobPollDefinition())
         add(jobKillDefinition())
+        // [T-android-ask-user-tool] Mid-turn question to the user.
+        add(askUserDefinition())
     }
 
     // Aligned with iOS AIChatViewModel.swift:4982-4993
@@ -262,6 +264,26 @@ object AgentTools {
         ),
         required = listOf("tool_title", "id"),
         propertyOrdering = listOf("tool_title", "id"),
+    )
+
+    // [T-android-ask-user-tool] ask_user: mid-turn decision point.
+    private fun askUserDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = "ask_user",
+        description = "Ask the user a question when you hit a genuine decision " +
+            "point that cannot be resolved from context (an ambiguity that changes " +
+            "the outcome, a destructive action that needs confirmation, or a " +
+            "preference only the user knows). The question is posted as a " +
+            "high-priority notification with an inline reply field; the answer " +
+            "arrives as the next user message in this session. " +
+            "End your turn immediately after calling this tool. " +
+            "Do NOT use this for trivial preferences — prefer reasonable defaults " +
+            "and state your choice. Use sparingly.",
+        parameters = mapOf(
+            "tool_title" to AgentToolParam("string", "A concise 5-10 word summary (e.g. 'Ask which database to use')."),
+            "question" to AgentToolParam("string", "The question to ask. Be specific; include the options you are weighing if any. The user sees exactly this text."),
+        ),
+        required = listOf("tool_title", "question"),
+        propertyOrdering = listOf("tool_title", "question"),
     )
 
     // [T-android-subagent-tool] agent_status: query subagent runs.

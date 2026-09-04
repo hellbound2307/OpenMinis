@@ -9243,6 +9243,13 @@ class ChatViewModel(
                 argsJson = argsJson,
                 sessionId = activeSessionId,
             )
+            // [T-android-ask-user-tool] Post a question notification; the
+            // answer arrives as the next user turn.
+            "ask_user" -> com.openminis.app.tools.ask.AskUserTools.execute(
+                argsJson = argsJson,
+                sessionId = activeSessionId,
+                context = context,
+            )
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
     }
