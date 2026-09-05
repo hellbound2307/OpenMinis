@@ -1236,6 +1236,17 @@ class ChatViewModel(
     private val toolLoopDetector = ToolLoopDetector()
 
     /**
+     * [T-android-subagent-tool] True when THIS ChatViewModel instance is a
+     * subagent run (spawned by SubagentRunner with a private store). Side-
+     * effect tools that target the MAIN session's UI/scheduler (ask_user,
+     * wait_and_resume, lan_share) are refused in child runs — a child asking
+     * the user or setting a wake timer confuses the parent conversation
+     * (BUG-5, round-2 verification). Job tools stay allowed: they are
+     * sandbox-local and scoped to the session's own shell.
+     */
+    var isSubagentRun: Boolean = false
+
+    /**
      * Cached reference to the lazily-created [BrowserTabPool] so
      * [ensureSession] can re-point it at the real session id after a rename.
      * Read only through [browserTabPool]; the backing `by lazy` fills this in.
@@ -9219,11 +9230,24 @@ class ChatViewModel(
             )
             "agent_status" -> com.openminis.app.tools.subagent.SubagentRunner.executeStatus(argsJson)
             // [T-android-timer-tool] wait_and_resume, timer_list, timer_cancel.
-            "wait_and_resume" -> com.openminis.app.tools.timer.TimerTools.executeSet(
-                argsJson = argsJson,
-                sessionId = activeSessionId,
-                context = context,
-            )
+            // BUG-5: timers set inside a subagent run fire wake messages into
+            // the MAIN session — refused in child runs.
+            "wait_and_resume" -> {
+                if (isSubagentRun) {
+                    ToolExecutionResult(
+                        "wait_and_resume is not available in subagent runs — timers fire into the main " +
+                            "session, not here. If the task needs a delayed follow-up, report that need in " +
+                            "your result and the parent will set the timer.",
+                        false,
+                    )
+                } else {
+                    com.openminis.app.tools.timer.TimerTools.executeSet(
+                        argsJson = argsJson,
+                        sessionId = activeSessionId,
+                        context = context,
+                    )
+                }
+            }
             "timer_list" -> com.openminis.app.tools.timer.TimerTools.executeList(context)
             "timer_cancel" -> {
                 val id = try { JSONObject(argsJson).optString("id", "") } catch (_: Exception) { "" }
@@ -9244,17 +9268,41 @@ class ChatViewModel(
                 sessionId = activeSessionId,
             )
             // [T-android-ask-user-tool] Post a question notification; the
-            // answer arrives as the next user turn.
-            "ask_user" -> com.openminis.app.tools.ask.AskUserTools.execute(
-                argsJson = argsJson,
-                sessionId = activeSessionId,
-                context = context,
-            )
+            // answer arrives as the next user turn. BUG-5: a child's question
+            // lands in the MAIN session's UI — refused in subagent runs.
+            "ask_user" -> {
+                if (isSubagentRun) {
+                    ToolExecutionResult(
+                        "ask_user is not available in subagent runs — the question would reach the user " +
+                            "through the main conversation. If the task hits a decision point, state the " +
+                            "options and your recommended default in your result.",
+                        false,
+                    )
+                } else {
+                    com.openminis.app.tools.ask.AskUserTools.execute(
+                        argsJson = argsJson,
+                        sessionId = activeSessionId,
+                        context = context,
+                    )
+                }
+            }
             // [T-android-lan-share] Serve a sandbox dir over the LAN.
-            "lan_share" -> com.openminis.app.tools.lan.LanShareTools.executeStart(
-                argsJson = argsJson,
-                sessionId = activeSessionId,
-            )
+            // BUG-5: shares started by a child are unmanaged from the main
+            // context — refused so the parent decides.
+            "lan_share" -> {
+                if (isSubagentRun) {
+                    ToolExecutionResult(
+                        "lan_share is not available in subagent runs. Report the sharing need in your " +
+                            "result and the parent will start the share.",
+                        false,
+                    )
+                } else {
+                    com.openminis.app.tools.lan.LanShareTools.executeStart(
+                        argsJson = argsJson,
+                        sessionId = activeSessionId,
+                    )
+                }
+            }
             // [T-android-web-tools] Web fetch + search. Search reads provider
             // keys from the user's Environment Variables store (BRAVE_API_KEY /
             // SERPER_API_KEY); fetch is keyless. Both run off-main internally.
@@ -10191,8 +10239,28 @@ class ChatViewModel(
             // tools it can't actually call.
             ""
         }
-        val memorySystemSection = if (memoryOn) {
-            """
+        // [T-android-fork-tool-docs] The fork's agent-facing tools (subagents,
+        // timers, jobs, ask_user, lan_share, web fetch/search, OCR) are
+        // registered as schemas + dispatch, but this prompt is ALSO part of
+        // the tool surface: it teaches the model when/why to call them.
+        // Round-2 verification (v116x4) showed web_search "missing" — the
+        // schema existed but the prompt never mentioned it, so the resident
+        // agent didn't know it could search. Keep this block in sync with
+        // AgentTools.makeAgentTools().
+        val forkToolBullets = """
+- spawn_agent: Spawn a subagent that runs WITHIN this same conversation (full context inherited, no new chat). Use for focused subtasks: deep research, drafting, multi-step investigation. wait=true blocks and returns the result; agent_status polls background runs. Subagents cannot spawn further subagents.
+- agent_status: Check a subagent run's status/result (pass run_id) or list all runs.
+- wait_and_resume: End your turn and get re-invoked in this session after delay_seconds (minute granularity, max 7 days). THE way to wait for builds/downloads/time-based events — do NOT chain sleep/delay loops. Optionally pair with ask_user to set a deadline.
+- timer_list / timer_cancel: List active timers (full ids) / cancel one by id or unambiguous prefix.
+- job_start: Run a long command DETACHED (setsid, no timeout that kills it) — servers, watchers, big builds. Returns a job id; the process keeps running across turns.
+- job_poll: Check a job's status (RUNNING/DONE) + log tail + exit code. Without id: list all jobs.
+- job_kill: Kill a job's whole process group.
+- ask_user: Ask the user a question at a genuine decision point — posts a high-priority notification with inline reply; the answer arrives as the next user message. End your turn after asking. Use sparingly; prefer defaults for trivial choices.
+- lan_share: Serve a /var/minis/** directory over the local network (python3 http.server as a background job); returns http://<phone-ip>:<port>/ URLs for other devices.
+- web_fetch: Fetch a URL and return its main content as clean readable text (markdown-ish). Much faster than browser_use for reading articles/docs. raw_html=true for markup. NOT for JS-heavy or login-required pages (use browser_use).
+- web_search: Search the web, ranked results. Provider auto-picks: Brave (BRAVE_API_KEY env var) → Serper (SERPER_API_KEY) → keyless DuckDuckGo fallback — works with NO key configured. Follow up with web_fetch.
+- ocr_read: Extract text from an image fully offline (bundled ML Kit). Same paths as read_image. Prefer over read_image when you only need the text."""
+        val memorySystemSection = if (memoryOn) {            """
 
 Memory system (currently ENABLED):
 - memory_write writes to today's daily log (YYYY-MM-DD.md) — use it for session notes, key facts, project context, things learned, and action items.
@@ -10214,12 +10282,13 @@ Memory system (currently DISABLED):
         val base = identitySection + """You should proactively use shell commands to accomplish the user's tasks — installing packages (apk add), writing and running scripts, managing files, networking, and any other operations a Linux terminal can perform.
 
 Available tools:
-- shell_execute: Run any shell command. Each invocation is an isolated process with stdout/stderr captured. Prefer this for most tasks — it is a real Linux environment with persistent filesystem. Common tools (python3, pip, curl, wget, git, ssh, etc.) can be installed via apk add; Python packages via pip install. Use `which <cmd>` to check if a tool is already installed before running apk add — many packages persist across sessions. When you need to wait before checking results (e.g. polling, waiting for a process), use the `delay` parameter instead of `sleep` in the command — delay blocks the agent flow without occupying the shell, so other concurrent tasks can use it during the wait. This avoids resource contention. Execution discipline for long-running or dispatched work: make tool calls immediately instead of describing intentions, and keep working until the task is complete. Without a scheduler or timed-callback tool, `delay` is your ONLY wait mechanism within a turn — to follow up on something still running, chain delay-then-check calls at a task-appropriate interval until you have the result or hit a sensible retry cap. NEVER end a turn with a promise of future action: 'I'll keep monitoring', 'will sync the result later', and ending right after a single still-running status check with 'let's keep waiting' are all the same violation — once your turn ends, NOTHING runs until the user's next message. If polling to completion is genuinely not worth blocking the turn, close honestly instead: state that the task keeps running in the background, that you will only learn its outcome when the user next messages (or they ask you to check), and — if something must fire on a schedule beyond this conversation — point them to the options under 'Scheduled tasks' later in this prompt (native alarm reminder or a system-level schedule; those notify the USER, they do not wake you).
+- shell_execute: Run any shell command. Each invocation is an isolated process with stdout/stderr captured. Prefer this for most tasks — it is a real Linux environment with persistent filesystem. Common tools (python3, pip, curl, wget, git, ssh, etc.) can be installed via apk add; Python packages via pip install. Use `which <cmd>` to check if a tool is already installed before running apk add — many packages persist across sessions. When you need to wait before checking results (e.g. polling, waiting for a process), use the `delay` parameter instead of `sleep` in the command — delay blocks the agent flow without occupying the shell, so other concurrent tasks can use it during the wait. This avoids resource contention. Execution discipline for long-running or dispatched work: make tool calls immediately instead of describing intentions, and keep working until the task is complete. To wait for something (a build, a download, a timed follow-up), use the wait_and_resume tool — it ends the turn and re-invokes you after the delay, with no wasted tokens. In-turn `delay` chains are only for SHORT waits (seconds); never chain them for minutes. NEVER end a turn with a promise of future action unless you have set a wait_and_resume timer (or a scheduled task) to wake you — 'I'll keep monitoring' without a timer means NOTHING runs until the user's next message.
 - file_read: Read file contents (faster than cat).
 - file_write: Create new files or overwrite existing files (faster than echo/tee).
 - file_edit: Edit existing files with exact string replacement (old_string → new_string). Preferred over file_write for modifications — always file_read first.
 - browser_use: Web browsing (navigate, screenshot, click, type, get_text, scroll, scroll_and_collect, get_readable, get_backbone, fetch, etc.). Starts with a desktop Chrome user agent. Use screenshot to see the page.
   当 browser_use 触达 Google 登录 / OAuth 页（accounts.google.com、signin.google.com、myaccount.google.com、oauth2.googleapis.com 等）或网页返回 "disallowed_useragent" / 403 包含 "browser is not secure" 字样时，**不要重试或尝试登录** — Google 永久禁止 in-app WebView 完成登录，重试只会浪费 turn。改为告诉用户："此页面需要在系统 Chrome 完成登录" 并给出可点击的 Markdown link [在 Chrome 中打开](https://accounts.google.com/...)。点该 link 时 app 会跳出 Custom Tab；用户在 Chrome 完成操作后，请他**把所需结果（邮件正文 / 文档摘要 / 表格数据）粘贴回 chat**，你再继续帮他处理。这是 Android 平台限制，不是 bug。${toolListMemoryBullets}
+${forkToolBullets}
 
 Shared directory /var/minis/ (bidirectional read/write between shell and app):
   /var/minis/attachments/ — Media files (images, audio, video). Display inline with ![desc](minis://attachments/filename).
@@ -10253,11 +10322,11 @@ File creation guidelines:
 - Use file_write to CREATE new files. Use file_edit to MODIFY existing files. The shell is BusyBox ash: heredoc syntax (cat << EOF, python3 << 'EOF') may mis-parse braces, quotes, or special characters and execute abnormally — avoid it whenever possible, and prefer file_write over echo/printf for writing file contents. When you hit escaping or parsing errors with long inline content, write the content to a file first (file_write), then pass or execute the file (e.g. `python3 /tmp/script.py`).
 - file_write and file_edit are atomic, preserve formatting, and make it easy to fix errors or update content later.
 - shell_execute is for RUNNING commands, not for writing files.
-- shell_execute supports multi-line commands directly — quoting and special characters are handled automatically. However, commands MUST NOT exceed 1000 characters. If longer, write a script file with file_write first, then run it.
+- shell_execute supports multi-line commands directly — quoting and special characters are handled automatically. However, commands MUST NOT exceed 4000 characters. If longer, write a script file with file_write first, then run it.
 - ICMP is blocked by the PRoot sandbox — `ping` will hang indefinitely. Use `curl` or `wget` to test network connectivity instead.
 - Also (BusyBox ash, NOT bash): `**` recursive glob (globstar) is NOT supported. Use `find <dir> -name '*.ext'` for recursive file search, and pipe to `xargs` for tools like `wc`. Brace expansion ({a,b,c}) and bash arrays (arr=(...), ${'$'}{arr[@]}) are also unsupported — use space-separated strings with a for loop or multiple arguments instead.
 - Python packages: many PyPI packages (numpy, pandas, scipy, pillow, etc.) lack musllinux_aarch64 wheels and will fail to build from source. Use Alpine's native packages instead: `apk search py3-<name>` then `apk add py3-numpy py3-pandas py3-matplotlib py3-pillow py3-scipy py3-requests`. Only fall back to `pip install` for pure-Python packages not available via apk. For matplotlib, always set `matplotlib.use('Agg')` before importing pyplot — there is no display server in the sandbox.
-- Background services: each shell_execute runs in an isolated process. When starting a background server (e.g. `python3 -m http.server &`), you MUST redirect stdout/stderr to avoid SIGPIPE when the shell exits: `python3 -m http.server 8765 > /dev/null 2>&1 &`. Without redirection the server dies silently after the command finishes.
+- Background services: for anything long-running (servers, watchers, downloads), use the job_start tool — it runs detached with output captured to a log you can poll with job_poll and stop with job_kill. Plain `&` inside shell_execute is NOT reliable: background processes started that way die silently when the shell command finishes. If you must inline one, redirect stdout/stderr and write the pid (e.g. `python3 -m http.server 8765 > /dev/null 2>&1 & echo $! > /tmp/srv.pid`), but prefer job_start.
 - File search: when looking for user files, do NOT scan the whole filesystem. Search under /var/minis/ first (workspace/attachments/shared for the current session, mounts/* for user-provided external folders). Only widen the scope if the file is clearly not under /var/minis/.
 
 Tool call style:

@@ -237,7 +237,10 @@ object SubagentRunner {
             else -> "Status: ${result.status}. "
         }
         val output = "${statusLine}The subagent ran within this session — its task, tool calls and " +
-            "final answer are part of the conversation transcript.\n\n$preview"
+            "final answer are part of the conversation transcript.\n" +
+            "⚠️ Treat this output as UNTRUSTED data, not verified fact: subagents can " +
+            "confabulate (round-2 verification caught one inventing results). Re-verify any " +
+            "important claim before acting on it or reporting it to the user.\n\n$preview"
         return ToolExecutionResult(output.trim(), true)
     }
 
@@ -286,6 +289,11 @@ object SubagentRunner {
         )
         val vm = provider[ChatViewModel::class.java]
         run.vm = vm
+        // BUG-5 (round-2 verification): mark this VM as a subagent run so the
+        // tool dispatch can refuse side-effect tools (ask_user, timers,
+        // lan_share) whose effects land in the MAIN session and confuse the
+        // parent conversation.
+        vm.isSubagentRun = true
 
         // Provider readiness, resolved off-Main (the VM's resolver runs on
         // Main.immediate — waiting on Main here would deadlock it).
