@@ -180,6 +180,16 @@ object JobTools {
     private fun buildWrapper(id: String, command: String): String {
         // Single-quoted heredoc-style embedding: base64 the user command so
         // quoting is bulletproof regardless of what the agent passes.
+        //
+        // BUG-1 FIX (v116x3 verification): the old wrapper's `&` bound the
+        // ENTIRE `mkdir && ... && setsid ...` chain as one background job, so
+        // `echo $! > pid` raced ahead of `mkdir` (fresh session → nonexistent
+        // dir → pid write failed) while the backgrounded chain still spawned
+        // the process — an untracked orphan. Now: mkdir + cmd write are
+        // SEQUENTIAL (`;`), only the setsid line is backgrounded, and the
+        // pid-write + confirmation are grouped in { } right after the spawn.
+        // If mkdir or the cmd write fails, nothing was spawned and the whole
+        // command exits non-zero → job_start reports failure cleanly.
         val b64 = android.util.Base64.encodeToString(
             command.toByteArray(Charsets.UTF_8),
             android.util.Base64.NO_WRAP,
@@ -187,9 +197,10 @@ object JobTools {
         return (
             "mkdir -p $JOBS_DIR && " +
                 "echo $b64 | base64 -d > $JOBS_DIR/$id.cmd && " +
-                "setsid sh -c 'sh $JOBS_DIR/$id.cmd > $JOBS_DIR/$id.log 2>&1; " +
+                "{ setsid sh -c 'sh $JOBS_DIR/$id.cmd > $JOBS_DIR/$id.log 2>&1; " +
                 "echo $? > $JOBS_DIR/$id.code' < /dev/null > /dev/null 2>&1 & " +
-                "echo $! > $JOBS_DIR/$id.pid && echo STARTED:$!"
+                "echo $! > $JOBS_DIR/$id.pid; " +
+                "kill -0 \"$(cat $JOBS_DIR/$id.pid)\" 2>/dev/null && echo STARTED:$(cat $JOBS_DIR/$id.pid); }"
             )
     }
 

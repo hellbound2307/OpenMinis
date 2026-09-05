@@ -71,10 +71,24 @@ object AskUserTools {
 
         val id = UUID.randomUUID().toString().take(8)
         pending[id] = PendingQuestion(id, sessionId, question, System.currentTimeMillis())
-        postNotification(context, id, sessionId, question)
+
+        // BUG-3 fix (v116x3 verification): the whole post path is wrapped so
+        // ANY failure returns a normal tool error instead of blowing up the
+        // dispatch ("Tool execution was interrupted by an unexpected error").
+        // Root cause of the deterministic failure was also here:
+        // `getSystemService(NOTIFICATION_SERVICE) as NotificationManagerCompat`
+        // throws ClassCastException — that service returns
+        // android.app.NotificationManager. Use NotificationManagerCompat.from().
+        val posted = runCatching { postNotification(context, id, sessionId, question) }
+            .onFailure { AppLogger.error(TAG, "ask_user notification failed: ${it.message}") }
+            .isSuccess
+
+        val channelNote = if (posted) ""
+        else " (notification unavailable — no POST_NOTIFICATIONS permission or post error; " +
+            "the user will still see the question in the chat transcript)"
 
         return com.openminis.app.tools.ToolExecutionResult(
-            "Question posted to the user (id $id): \"$question\"\n" +
+            "Question delivered to the user (id $id): \"$question\"$channelNote\n" +
                 "The user can reply inline on the notification or by typing in the chat. " +
                 "Their answer will arrive as the next user message in this session. " +
                 "End your turn now — do not repeat the question or poll for the answer.",
@@ -82,14 +96,15 @@ object AskUserTools {
         )
     }
 
-    private fun postNotification(context: Context, id: String, sessionId: String, question: String) {
+    /** Returns true when a notification was actually posted. */
+    private fun postNotification(context: Context, id: String, sessionId: String, question: String): Boolean {
         if (Build.VERSION.SDK_INT >= 33 &&
             context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             AppLogger.warning(TAG, "POST_NOTIFICATIONS not granted — question only visible in chat")
-            return
+            return false
         }
-        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManagerCompat
+        val manager = NotificationManagerCompat.from(context)
         // High-importance channel for heads-up display.
         if (Build.VERSION.SDK_INT >= 26) {
             val channel = android.app.NotificationChannel(
@@ -130,7 +145,8 @@ object AskUserTools {
             .addAction(replyAction)
             .setAutoCancel(true)
             .build()
-        runCatching { manager.notify(NOTIF_TAG, id.hashCode(), notification) }
+        manager.notify(NOTIF_TAG, id.hashCode(), notification)
+        return true
     }
 
     /** Called by the receiver after an answer arrives. */

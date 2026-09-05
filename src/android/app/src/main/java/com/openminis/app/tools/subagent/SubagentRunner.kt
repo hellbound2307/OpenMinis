@@ -309,7 +309,24 @@ object SubagentRunner {
 
         // Headless-safe send: the pre-send compact dialog can never park the
         // task (a headless VM has nobody to answer it).
-        vm.sendMessageHeadless(task)
+        //
+        // BUG-4 fix (v116x3 verification): the child saw the full parent
+        // transcript with no framing and got swept up in it (e.g. re-running
+        // the parent's timer tests instead of its own task). Frame the task
+        // explicitly: context-only history, exact task, no side effects.
+        val framedTask = buildString {
+            append("[SUBAGENT RUN — ${run.runId}] You are now executing as a SUBAGENT.\n")
+            append("The conversation above is CONTEXT ONLY — it was written by other runs. ")
+            append("Do NOT continue, verify, repeat, or 'clean up' anything from it.\n")
+            append("Execute EXACTLY this task and nothing else:\n")
+            append("=== TASK ===\n")
+            append(task.trim())
+            append("\n=== END TASK ===\n")
+            append("Rules: do not start side effects (timers via wait_and_resume, background jobs, ")
+            append("messages, or scheduled tasks) unless the task explicitly requires them; ")
+            append("stay within the task's scope; when done, return the result directly.")
+        }
+        vm.sendMessageHeadless(framedTask)
 
         withContext(Dispatchers.Default) {
             // ── Phase 1: START ────────────────────────────────────────────

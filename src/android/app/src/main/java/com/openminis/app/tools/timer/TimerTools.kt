@@ -94,7 +94,9 @@ object TimerTools {
 
         AppLogger.info(TAG, "timer set: id=${saved.id} delay=${delaySec}s fireAt=$fireAt session=$sessionId")
         return ToolExecutionResult(
-            output = "Timer set. Fire in ${humanDuration(delaySec.toLong())}. " +
+            output = "Timer set. Requested delay: ${humanDuration(delaySec.toLong())} — " +
+                "actual fire is minute-granular (rounds to the next whole minute, so it may " +
+                "fire up to ~1 min early/late). " +
                 "Timer id: ${saved.id}. " +
                 "The agent will be re-invoked when the timer fires. " +
                 "End your turn now.",
@@ -112,27 +114,35 @@ object TimerTools {
         val lines = timers.map { t ->
             val next = t.nextTriggerMs()
             val timeStr = if (next != null) {
-                val diff = (next - System.currentTimeMillis()) / 1000
+                // BUG-2 display fix: round UP to the next minute — the same
+                // delay that set the timer reports the same duration here.
+                // (Rounding down made a 125s timer show "1m 0s".)
+                val diff = (next - System.currentTimeMillis() + 59_999) / 1000
                 if (diff > 0) "${humanDuration(diff)} from now" else "any moment"
             } else "unknown"
             val snippet = t.label.removePrefix(TIMER_PREFIX).trim().take(40)
-            "  ${t.id.take(8)} — $snippet ($timeStr)"
+            "  ${t.id} — $snippet ($timeStr)"
         }
         return ToolExecutionResult(
-            "Active timers:\n${lines.joinToString("\n")}",
+            "Active timers (full ids — pass one to timer_cancel):\n${lines.joinToString("\n")}",
             true,
         )
     }
 
-    /** Cancel a timer by id. Only cancels [timer]-prefixed tasks. */
+    /** Cancel a timer by id (full UUID or unambiguous prefix). */
     fun executeCancel(id: String, context: android.content.Context): ToolExecutionResult {
+        if (id.isBlank()) return ToolExecutionResult("Error: 'id' is required", false)
         val manager = ScheduledTaskManager(context)
+        // BUG-2 fix: accept unambiguous id prefixes — timer_list previously
+        // showed truncated ids that timer_cancel then rejected.
         val task = manager.get(id)
+            ?: manager.list().firstOrNull { it.id.startsWith(id) && it.label.startsWith(TIMER_PREFIX) }
+            ?: manager.list().firstOrNull { it.id.startsWith(id) }
         if (task == null) return ToolExecutionResult("Timer not found: $id", false)
         if (!task.label.startsWith(TIMER_PREFIX)) {
-            return ToolExecutionResult("Task $id is not a timer.", false)
+            return ToolExecutionResult("Task ${task.id} is not a timer (it is a regular scheduled task).", false)
         }
-        manager.delete(id)
+        manager.delete(task.id)
         return ToolExecutionResult("Timer cancelled: ${task.label.removePrefix(TIMER_PREFIX).trim()}", true)
     }
 
