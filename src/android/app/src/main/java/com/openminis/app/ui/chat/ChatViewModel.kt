@@ -9255,6 +9255,21 @@ class ChatViewModel(
                 argsJson = argsJson,
                 sessionId = activeSessionId,
             )
+            // [T-android-web-tools] Web fetch + search. Search reads provider
+            // keys from the user's Environment Variables store (BRAVE_API_KEY /
+            // SERPER_API_KEY); fetch is keyless. Both run off-main internally.
+            "web_fetch" -> com.openminis.app.tools.web.WebFetchTool.execute(argsJson)
+            "web_search" -> com.openminis.app.tools.web.WebSearchTool.execute(
+                argsJson = argsJson,
+                envVars = ExecutionCoordinator.envVarRepository?.allAsDict() ?: emptyMap(),
+            )
+            // [T-android-ocr-tool] Local text extraction from images
+            // (same session-path resolution as read_image).
+            com.openminis.app.tools.ocr.OcrTool.NAME -> com.openminis.app.tools.ocr.OcrTool.execute(
+                argsJson = argsJson,
+                sessionId = activeSessionId,
+                context = context,
+            )
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
     }

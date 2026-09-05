@@ -302,6 +302,15 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
 
+    // [T-android-web-tools] Jsoup for web_fetch (HTML fetch + clean-text
+    // extraction) and web_search result parsing. Pure-Java, no native deps.
+    implementation("org.jsoup:jsoup:1.18.3")
+
+    // [T-android-ocr-tool] ML Kit text recognition v2, BUNDLED flavor — the
+    // model ships inside the APK so OCR works fully offline (the thin GMS
+    // variant needs Play Services at runtime). Latin script base model.
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+
     // Kotlinx Serialization
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 

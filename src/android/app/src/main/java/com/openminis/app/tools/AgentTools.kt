@@ -56,6 +56,11 @@ object AgentTools {
         add(askUserDefinition())
         // [T-android-lan-share] Share a sandbox dir over the LAN.
         add(lanShareDefinition())
+        // [T-android-web-tools] Web fetch + search (no browser needed).
+        add(WebFetchTool.definition())
+        add(webSearchDefinition())
+        // [T-android-ocr-tool] Local text extraction from images.
+        add(com.openminis.app.tools.ocr.OcrTool.definition())
     }
 
     // Aligned with iOS AIChatViewModel.swift:4982-4993
@@ -318,5 +323,22 @@ object AgentTools {
         ),
         required = listOf("tool_title"),
         propertyOrdering = listOf("tool_title", "port", "path"),
+    )
+
+    // [T-android-web-tools] web_search: ranked results, pluggable providers.
+    private fun webSearchDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = "web_search",
+        description = "Search the web and get ranked results (title, URL, snippet). " +
+            "Provider is automatic: Brave API when the BRAVE_API_KEY environment " +
+            "variable is set, Serper/Google when SERPER_API_KEY is set, otherwise " +
+            "keyless DuckDuckGo. Add a key in Settings → Environment Variables for " +
+            "higher quality. Follow up with web_fetch to read promising results.",
+        parameters = mapOf(
+            "tool_title" to AgentToolParam("string", "A concise 5-10 word summary of what this tool call does, shown to the user. Use the same language as the user."),
+            "query" to AgentToolParam("string", "The search query. Specific keywords work best; quotes for exact phrases."),
+            "count" to AgentToolParam("integer", "Max results (default 8, max 10)."),
+        ),
+        required = listOf("tool_title", "query"),
+        propertyOrdering = listOf("tool_title", "query", "count"),
     )
 }
