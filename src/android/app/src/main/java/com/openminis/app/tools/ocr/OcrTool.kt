@@ -53,7 +53,7 @@ object OcrTool {
         propertyOrdering = listOf("tool_title", "path"),
     )
 
-    fun execute(argsJson: String, sessionId: String?, context: Context?): ToolExecutionResult {
+    suspend fun execute(argsJson: String, sessionId: String?, context: Context?): ToolExecutionResult {
         val safeContext = context ?: return ToolExecutionResult("Internal error: no context", false)
         return try {
             val args = JSONObject(argsJson)
@@ -82,6 +82,8 @@ object OcrTool {
 
             val image = InputImage.fromBitmap(bitmap, 0)
             val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+            // suspendCancellableCoroutine requires a suspend caller — execute()
+            // is suspend (dispatched from ChatViewModel's suspend executeTool).
             val text = suspendCancellableCoroutine { cont ->
                 recognizer.process(image)
                     .addOnSuccessListener { cont.resume(it.text) }

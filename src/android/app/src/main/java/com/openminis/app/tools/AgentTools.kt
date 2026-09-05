@@ -57,7 +57,7 @@ object AgentTools {
         // [T-android-lan-share] Share a sandbox dir over the LAN.
         add(lanShareDefinition())
         // [T-android-web-tools] Web fetch + search (no browser needed).
-        add(WebFetchTool.definition())
+        add(com.openminis.app.tools.web.WebFetchTool.definition())
         add(webSearchDefinition())
         // [T-android-ocr-tool] Local text extraction from images.
         add(com.openminis.app.tools.ocr.OcrTool.definition())
