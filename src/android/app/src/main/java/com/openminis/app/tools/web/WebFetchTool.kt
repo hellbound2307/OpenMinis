@@ -107,13 +107,14 @@ object WebFetchTool {
     private fun formatJsonOrCode(body: String, contentType: String): String {
         val trimmed = body.trim()
         // Pretty-print JSON when it parses; otherwise pass through.
-        return if (contentType.contains("json")) {
+        val text = if (contentType.contains("json")) {
             runCatching {
                 val value = if (trimmed.startsWith("[")) org.json.JSONArray(trimmed) else org.json.JSONObject(trimmed)
                 value.toString(2)
             }.getOrElse { trimmed }
         } else trimmed
-    }.let { it.take(MAX_OUTPUT_CHARS) }
+        return text.take(MAX_OUTPUT_CHARS)
+    }
 
     /**
      * Readability heuristic: score container candidates by text length of
